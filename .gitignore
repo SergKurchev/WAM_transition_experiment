@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+*.trt
+*.engine
+*.plan
+*.onnx
+*.pt
+*.pth
+*.bin
+*.safetensors
+.env
+.env.local

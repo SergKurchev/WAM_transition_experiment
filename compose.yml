@@ -1,0 +1,145 @@
+# WAM inference stack — Isaac Sim + GEAR-SONIC + WAM model.
+# Stripped from mws-dimos/docker/dimos-compose.yml: no bridge, no DimOS, no LCM.
+#
+# Usage (from wam-stack/):
+#   scripts/start.sh                                  # start all
+#   scripts/start.sh --scene /path/to/scene.usd       # with scene
+#   scripts/start.sh --build                          # rebuild wam image then start
+#
+# Visual monitoring: port 6080 (noVNC) exposed by isaac-sim container.
+# SSH tunnel: ssh -L 6080:localhost:6080 x32-techgov-GPU-01
+# Then open: http://localhost:6080
+#
+# Hot-reload WAM code:  edit src/ locally → sync → docker compose restart wam
+# Hot-reload Isaac sim: edit ../mws-dimos/sim/ locally → sync → docker compose exec isaac-sim <reset signal>
+
+services:
+
+  # --------------------------------------------------------------------------
+  # GEAR-SONIC whole-body control policy (C++ TensorRT binary).
+  # Subscribes: rt/lowstate  |  Publishes: rt/lowcmd
+  # Built from mws-dimos — do not modify.
+  # --------------------------------------------------------------------------
+  gear-sonic:
+    build:
+      context: ../mws-dimos/
+      dockerfile: docker/gear-sonic/Dockerfile
+      args:
+        TENSORRT_IMAGE: ${TENSORRT_IMAGE:-nvcr.io/nvidia/tensorrt:24.12-py3}
+    image: mws-gear-sonic-policy:latest
+    container_name: wam-gear-sonic
+    network_mode: host
+    volumes:
+      - ../mws-dimos/modules/gwbc/gear_sonic_deploy:/opt/gear_sonic_deploy:rw
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    command:
+      - /usr/local/bin/g1_deploy_onnx_ref
+      - lo
+      - /opt/gear_sonic_deploy/policy/release/model_decoder.onnx
+      - /opt/gear_sonic_deploy/reference/example/
+      - --obs-config
+      - /opt/gear_sonic_deploy/policy/release/observation_config.yaml
+      - --encoder-file
+      - /opt/gear_sonic_deploy/policy/release/model_encoder.onnx
+      - --planner-file
+      - /opt/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx
+      - --input-type
+      - dds
+      - --output-type
+      - all
+      - --disable-crc-check
+    runtime: nvidia
+    privileged: true
+    shm_size: '2gb'
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/gear-sonic-ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+      start_period: 180s
+
+  # --------------------------------------------------------------------------
+  # Isaac Sim — bare InteractiveScene + SimulationContext loop.
+  # Publishes: rt/lowstate, rt/odostate  |  Subscribes: rt/lowcmd
+  # Visual monitoring via noVNC on port 6080 (Xvfb + x11vnc + websockify).
+  # SSH tunnel: ssh -L 6080:localhost:6080 x32-techgov-GPU-01
+  # --------------------------------------------------------------------------
+  isaac-sim:
+    build:
+      context: ../mws-dimos/
+      dockerfile: docker/isaac-sim/Dockerfile
+      args:
+        BASE_IMAGE: ${ISAAC_SIM_BASE_IMAGE:-mws-dimos/isaac-sim-base:unitree-lab-5.1}
+    image: mws-dimos/isaac-sim:unitree-lab-5.1
+    container_name: wam-isaac-sim
+    entrypoint: ["/entrypoint.sh"]
+    command: ["/bin/bash", "/workspace/mws-dimos/scripts/isaac/launch_g1.sh"]
+    network_mode: host
+    volumes:
+      - ../mws-dimos/docker/isaac-sim/entrypoint.sh:/entrypoint.sh:ro
+      - ../mws-dimos/:/workspace/mws-dimos:rw
+      - ../mws-dimos/modules/gwbc:/workspace/gwbc:ro
+      - ../mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - ../mws-dimos/modules/gwbc/decoupled_wbc/control/robot_model/model_data/g1:/workspace/assets:ro
+      - ${SCENE_DIR:-/tmp}:/workspace/scene_assets:ro
+      - ${ROBOT_USD_DIR:-../mws-dimos/assets/robots/g1}:/workspace/robot_assets:ro
+    environment:
+      - ACCEPT_EULA=${ACCEPT_EULA:-Y}
+      - OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-YES}
+      - PRIVACY_CONSENT=${PRIVACY_CONSENT:-Y}
+      - DISPLAY=:99
+      - G1_TRAINING_ASSET_DIR=/workspace/assets
+      - SCENE_FILE=${SCENE_FILE:-}
+      - ROBOT_USD_FILE=${ROBOT_USD_FILE:-g1_29dof.usd}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    runtime: nvidia
+    shm_size: '8gb'
+    stdin_open: true
+    tty: true
+    # noVNC is on port 6080 — no ports: mapping needed because network_mode: host
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/isaac_ready"]
+      interval: 2s
+      timeout: 1s
+      retries: 60
+      start_period: 120s
+
+  # --------------------------------------------------------------------------
+  # WAM inference — your model (UnifoLM-WMA-0 or EVA).
+  # Reads rt/lowstate from Isaac Sim (via DDS).
+  # Publishes rt/run_command/cmd → GEAR-SONIC drives the robot.
+  # Code at ./src/ is bind-mounted: edit locally → docker compose restart wam.
+  # --------------------------------------------------------------------------
+  wam:
+    build:
+      context: .
+      dockerfile: docker/wam/Dockerfile
+    image: wam-inference:latest
+    container_name: wam-inference
+    network_mode: host
+    volumes:
+      - ./src:/workspace/wam:rw                                                              # hot-reload: your code
+      - ../mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro  # DDS SDK
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONPATH=/workspace/wam:/workspace/unitree_sdk2py_src
+      - PYTHONUNBUFFERED=1
+      - WAM_MODEL=${WAM_MODEL:-unifolm}       # unifolm | eva
+      - WAM_CHECKPOINT=${WAM_CHECKPOINT:-}    # path to checkpoint inside container
+      - DDS_IFACE=${DDS_IFACE:-lo}            # network interface for DDS (lo = loopback in sim)
+    runtime: nvidia
+    shm_size: '4gb'
+    stdin_open: true
+    tty: true
+    command: ["python", "/workspace/wam/main.py"]
+    depends_on:
+      isaac-sim:
+        condition: service_healthy
+      gear-sonic:
+        condition: service_healthy
