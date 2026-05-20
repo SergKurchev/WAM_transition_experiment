@@ -42,10 +42,6 @@ RUN pip install --no-cache-dir \
     pyyaml \
     tqdm
 
-# CycloneDDS Python — used by unitree_sdk2_python (mounted at runtime).
-# Pin to match the version bundled in the unitree SDK.
-RUN pip install --no-cache-dir cyclonedds==0.10.2
-
 # /workspace/wam      — your model code (bind-mounted, hot-reload)
 # /workspace/unitree_sdk2py_src — DDS SDK (bind-mounted read-only)
 WORKDIR /workspace/wam
