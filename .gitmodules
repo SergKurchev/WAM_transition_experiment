@@ -1,0 +1,3 @@
+[submodule "modules/gwbc"]
+	path = modules/gwbc
+	url = https://github.com/MWS-Physical-AI/GR00T-Kimodo.git

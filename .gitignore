@@ -1,3 +1,6 @@
+# Large generated robot assets (38MB+) — generate on server with scripts/isaac/prepare_g1_robot_usd.sh
+assets/robots/g1/configuration/*_base.usd
+
 __pycache__/
 *.pyc
 *.pyo

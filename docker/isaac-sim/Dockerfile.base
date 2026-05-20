@@ -1,0 +1,85 @@
+# Heavy base image for MWS Isaac Sim + IsaacLab work.
+#
+# Build this rarely, only when pinned simulator/runtime dependencies change:
+#   docker build -f docker/isaac-sim/Dockerfile.base -t mws-dimos/isaac-sim-base:unitree-lab-5.1 .
+#
+# The thin runtime image in docker/isaac-sim/Dockerfile should be used for
+# everyday iteration. Code is bind-mounted at runtime from the workspace.
+
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+ENV OMNI_KIT_ALLOW_ROOT=1
+ENV ACCEPT_EULA=Y
+ENV PRIVACY_CONSENT=Y
+ENV OMNI_KIT_ACCEPT_EULA=YES
+
+# Core build/runtime packages for Isaac Sim + IsaacLab + CycloneDDS.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates wget git git-lfs unzip \
+        gcc-12 g++-12 cmake build-essential \
+        libglu1-mesa-dev libvulkan1 vulkan-tools \
+        libglib2.0-0 libxext6 libxrender1 libsm6 libxcb1 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Miniconda + unitree_sim_env (python 3.11 to match the upstream recipe).
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p $CONDA_DIR && \
+    rm /tmp/miniconda.sh && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    conda create -n unitree_sim_env python=3.11 -y && \
+    conda clean -afy
+
+SHELL ["conda", "run", "--no-capture-output", "-n", "unitree_sim_env", "/bin/bash", "-c"]
+
+RUN conda install -y -c conda-forge "libgcc-ng>=12" "libstdcxx-ng>=12" && \
+    conda clean -afy
+
+# Keep the packaging toolchain below the setuptools 82 pkg_resources removal.
+# We also override Isaac Lab's exact `flatdict==4.0.1` pin to `4.1.0` later in
+# the image build so pip can consume the modern wheel instead of rebuilding the
+# 2020 sdist under contemporary packaging tooling.
+RUN pip install --no-cache-dir --upgrade pip "setuptools<82" wheel && \
+    pip install --no-cache-dir \
+        torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+# Isaac Sim via pip. This is one of the slow layers, so it lives in the base.
+RUN pip install --no-cache-dir "isaacsim[all,extscache]==5.1.0" \
+        --extra-index-url https://pypi.nvidia.com
+
+# Isaac Lab v2.3.2, installed once into the base image with runtime-only
+# dependencies. `isaaclab.sh` skips VSCode setup when it detects Docker;
+# during `docker build` that probe is unreliable under `conda run`, so create
+# `/.dockerenv` for this step explicitly. Avoid importing `AppLauncher` here:
+# that boots Omniverse Kit and can still trigger interactive EULA/bootstrap
+# flows during image build even when installation itself has succeeded.
+RUN mkdir -p /opt/code && \
+    git clone https://github.com/isaac-sim/IsaacLab.git /opt/code/IsaacLab && \
+    cd /opt/code/IsaacLab && \
+    git checkout v2.3.2 && \
+    sed -i 's/flatdict==4.0.1/flatdict==4.1.0/' /opt/code/IsaacLab/source/isaaclab/setup.py && \
+    touch /.dockerenv && \
+    ./isaaclab.sh --install none && \
+    rm -f /.dockerenv
+
+RUN git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x /opt/cyclonedds_src && \
+    cd /opt/cyclonedds_src && mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds && \
+    cmake --build . --target install -- -j"$(nproc)" && \
+    rm -rf /opt/cyclonedds_src
+
+ENV CYCLONEDDS_HOME=/opt/cyclonedds
+
+RUN pip install --no-cache-dir "cyclonedds==0.10.2"
+
+RUN echo 'source /opt/conda/etc/profile.d/conda.sh' >> /root/.bashrc && \
+    echo 'conda activate unitree_sim_env' >> /root/.bashrc
+
+WORKDIR /workspace

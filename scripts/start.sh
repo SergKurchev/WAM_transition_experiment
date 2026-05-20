@@ -6,14 +6,12 @@
 #   scripts/start.sh --scene /path/to/scene.usd           # load USD scene
 #   scripts/start.sh --build                              # rebuild WAM image, then start
 #   scripts/start.sh --build-only                         # build only, do not start
-#   scripts/start.sh --scene /path/to/scene.usd --build
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-MWS_DIMOS_ROOT="$(dirname "$PROJECT_ROOT")/mws-dimos"
-DEFAULT_ROBOT_USD="$MWS_DIMOS_ROOT/assets/robots/g1/g1_29dof.usd"
+DEFAULT_ROBOT_USD="$PROJECT_ROOT/assets/robots/g1/g1_29dof.usd"
 
 SCENE_PATH=""
 ROBOT_USD_PATH="$DEFAULT_ROBOT_USD"
@@ -23,16 +21,11 @@ COMPOSE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --scene)
-      SCENE_PATH="$2"; shift 2 ;;
-    --robot-usd)
-      ROBOT_USD_PATH="$2"; shift 2 ;;
-    --build)
-      BUILD=true; shift ;;
-    --build-only)
-      BUILD_ONLY=true; shift ;;
-    *)
-      COMPOSE_ARGS+=("$1"); shift ;;
+    --scene)     SCENE_PATH="$2"; shift 2 ;;
+    --robot-usd) ROBOT_USD_PATH="$2"; shift 2 ;;
+    --build)     BUILD=true; shift ;;
+    --build-only) BUILD_ONLY=true; shift ;;
+    *) COMPOSE_ARGS+=("$1"); shift ;;
   esac
 done
 
@@ -49,7 +42,7 @@ if [[ -f "$ROBOT_USD_PATH" ]]; then
   ROBOT_USD_FILE="$(basename "$ROBOT_USD_PATH")"
 fi
 
-# Auto-detect GPU SM → TensorRT image (A100 = SM 80 → 24.12 is fine)
+# Auto-detect GPU SM → TensorRT image (A100 = SM 80)
 if [[ -z "${TENSORRT_IMAGE:-}" ]]; then
   GPU_SM=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null \
            | head -1 | tr -d '.' || echo "80")
