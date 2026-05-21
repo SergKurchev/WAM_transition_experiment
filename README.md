@@ -18,10 +18,10 @@ GEAR-SONIC  ←──── rt/lowstate ────  Isaac Sim
       │                                  ▲
       └──────── rt/lowcmd ───────────────┘
 
-Visual output: Xvfb → x11vnc → noVNC → your browser (port 6080)
+Visual output: Xvfb → x11vnc → noVNC → your browser
 ```
 
-All communication over DDS (CycloneDDS, loopback interface).  
+All communication over CycloneDDS 0.10.2, loopback interface.  
 No DimOS, no LCM, no bridge.
 
 ---
@@ -30,8 +30,33 @@ No DimOS, no LCM, no bridge.
 
 | Alias | IP | Port | GPU |
 |-------|----|------|-----|
-| `x32-techgov-GPU-01` | 176.109.83.84 | 2221 | A100 #0 (primary) |
-| `x32-techgov-GPU-02` | 176.109.83.84 | 2222 | A100 #1 |
+| `x32-techgov-GPU-01` | 176.109.83.84 | 2221 | A100 #0 |
+| `x32-techgov-GPU-02` | 176.109.83.84 | 2222 | A100 #1 ← **wam-stack lives here** |
+
+---
+
+## Quick Deploy (daily use)
+
+Run from your local machine, from anywhere in the repo:
+
+```bash
+# Sync code + start all containers + show ports
+bash scripts/deploy.sh
+
+# Same, but rebuild WAM Docker image first (after Dockerfile changes)
+bash scripts/deploy.sh --build
+
+# Reset after robot fell
+bash scripts/deploy.sh --reset
+```
+
+Then open a **new terminal** and run the tunnel:
+
+```bash
+ssh -N -L 6081:localhost:6080 x32-techgov-GPU-02
+```
+
+Open browser: **http://localhost:6081**
 
 ---
 
@@ -40,237 +65,128 @@ No DimOS, no LCM, no bridge.
 ### 1. Clone with submodules
 
 ```bash
-ssh x32-techgov-GPU-01
+ssh x32-techgov-GPU-02
 cd /root/skurchev/workspace
 
 git clone --recurse-submodules \
   https://github.com/SergKurchev/WAM_transition_experiment.git wam-stack
 ```
 
-If you cloned without `--recurse-submodules`:
-```bash
-cd wam-stack
-git submodule update --init --recursive
-```
-
-### 2. Build the heavy Isaac Sim base image
-
-Only needed once. Takes **20–40 minutes**. Run inside `tmux`.
+### 2. Build the WAM Docker image (first time only, ~10 min)
 
 ```bash
-cd /root/skurchev/workspace/wam-stack
-tmux new -s base-build
-
-docker build \
-  -f docker/isaac-sim/Dockerfile.base \
-  -t mws-dimos/isaac-sim-base:unitree-lab-5.1 \
-  .
+bash scripts/deploy.sh --build
 ```
 
-Check if it's already built (skip if yes):
+This builds CycloneDDS 0.10.x from source (required — no binary wheels exist for
+cyclonedds 0.10.2 + Python 3.10) and installs PyTorch 2.7 + CUDA 12.8.
+
+> **Why 0.10.2?** GEAR-SONIC uses CycloneDDS 0.10.x. Using 11.x in WAM crashes
+> GEAR-SONIC with a segfault in `ddsi_xt_type_init_impl` during DDS discovery.
+
+### 3. Server-only binary files (already in place on GPU-02)
+
+These large files are NOT in git. They live at:
+
+```
+modules/gwbc/gear_sonic_deploy/
+├── policy/release/
+│   ├── model_encoder.onnx        (50 MB)
+│   └── model_decoder.onnx        (40 MB)
+├── planner/target_vel/V2/
+│   └── planner_sonic.onnx
+└── thirdparty/unitree_sdk2/thirdparty/lib/x86_64/
+    ├── libddsc.so / libddsc.so.0
+    └── libddscxx.so / libddscxx.so.0
+```
+
+If they're missing, copy from mws-dimos on the same server:
 ```bash
-docker images | grep isaac-sim-base
+cp -r /root/skurchev/workspace/mws-dimos/modules/gwbc/gear_sonic_deploy/policy \
+      /root/skurchev/workspace/wam-stack/modules/gwbc/gear_sonic_deploy/
 ```
-
-### 3. Generate the G1 robot USD (if `g1_29dof_base.usd` is missing)
-
-The large robot geometry file is not in git. Generate it once:
-
-```bash
-cd /root/skurchev/workspace/wam-stack
-# TODO: run prepare script (requires Isaac Sim env)
-# scripts/isaac/prepare_g1_robot_usd.sh
-```
-
-> Until this is automated, copy `g1_29dof_base.usd` from the existing server path:
-> ```bash
-> cp /root/skurchev/workspace/mws-dimos/assets/robots/g1/configuration/g1_29dof_base.usd \
->    /root/skurchev/workspace/wam-stack/assets/robots/g1/configuration/
-> ```
-
----
-
-## Launch
-
-Always work in `tmux` so the session survives SSH disconnects.
-
-```bash
-ssh x32-techgov-GPU-01
-tmux new -s sim        # or: tmux attach -t sim
-
-cd /root/skurchev/workspace/wam-stack
-```
-
-### First launch (build WAM image + start)
-
-```bash
-./scripts/start.sh --build \
-  --scene /root/skurchev/workspace/assets/office_demo.usdz
-```
-
-### Subsequent launches
-
-```bash
-./scripts/start.sh \
-  --scene /root/skurchev/workspace/assets/office_demo.usdz
-```
-
-### Startup sequence
-
-```
-gear-sonic ──┐
-             ├─► (both healthy) ─► wam starts inference
-isaac-sim  ──┘
-```
-
-Isaac Sim writes `/tmp/isaac_ready` after warm-up (**~2–5 min**).  
-GEAR-SONIC writes `/tmp/gear-sonic-ready` after TRT engine load (**~1–3 min**, cached after first run).  
-`wam` container starts only after both are healthy.
 
 ---
 
 ## Visual Monitoring (noVNC)
 
-Isaac Sim renders to a virtual display inside the container.  
-You access it through a browser on your local machine.
+Isaac Sim renders to a virtual display (Xvfb) inside its container.
+noVNC serves it over port 6080 on the server.
 
-### Step 1 — open SSH tunnel (local machine, new terminal)
-
-```bash
-# From anywhere on your local machine:
-ssh -N -L 6080:localhost:6080 x32-techgov-GPU-01
-
-# Or use the helper script (from CoRL2026/wam-stack/):
-./scripts/view.sh
-```
-
-Keep this terminal open while you're watching.
-
-### Step 2 — open browser
-
-```
-http://localhost:6080
-```
-
-You'll see the Isaac Sim viewport with the G1 robot in the office scene.  
-The view is live — physics and robot motion update in real time.
-
-### Switch to GPU-02
+### Open the tunnel (local machine, new terminal)
 
 ```bash
-./scripts/view.sh x32-techgov-GPU-02
+ssh -N -L 6081:localhost:6080 x32-techgov-GPU-02
 ```
 
----
+Keep this terminal open. Then open: **http://localhost:6081**
 
-## Monitoring Logs
+> Port 6080 is often busy on Windows. Use 6081 locally (maps to 6080 on server).
+
+### Verify the tunnel works
 
 ```bash
-# All containers at once
-docker compose -f compose.yml logs -f
-
-# Individual containers
-docker compose -f compose.yml logs -f wam
-docker compose -f compose.yml logs -f isaac-sim
-docker compose -f compose.yml logs -f gear-sonic
-
-# Last 100 lines + follow
-docker compose -f compose.yml logs --tail=100 -f wam
+curl -s http://localhost:6081 | head -3
+# Expected: <!DOCTYPE html> ...
 ```
 
-### Container health
+### Troubleshooting
 
-```bash
-docker compose -f compose.yml ps
-```
-
-Expected output once everything is up:
-```
-NAME                STATUS
-wam-gear-sonic      running (healthy)
-wam-isaac-sim       running (healthy)
-wam-inference       running
-```
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `bind: Permission denied` | Local port 6080 is busy | Use 6081: `ssh -N -L 6081:localhost:6080 ...` |
+| `channel: open failed: connect failed` | Stack not running | Run `bash scripts/deploy.sh` first |
+| noVNC loads, black screen | Isaac Sim still warming up | Wait 2–5 min |
+| Robot is lying down | GEAR-SONIC lost connection briefly | Run `bash scripts/deploy.sh --reset` |
 
 ---
 
 ## Updating WAM Code (hot-reload)
 
-Edit `src/` locally → sync to server → restart only the `wam` container.  
-Isaac Sim and GEAR-SONIC keep running.
+`src/` is bind-mounted into the container — changes are live after a restart.
 
 ```bash
-# 1. Edit src/ on local machine, then sync:
-./scripts/sync.sh x32-techgov-GPU-01:/root/skurchev/workspace
+# Edit src/*.py locally, then:
+bash scripts/deploy.sh          # syncs and restarts everything
 
-# 2. On server — restart WAM only (~5 seconds):
-ssh x32-techgov-GPU-01
-cd /root/skurchev/workspace/wam-stack
-docker compose -f compose.yml restart wam
-
-# 3. Watch logs:
-docker compose -f compose.yml logs -f wam
+# Or if only WAM changed and stack is already up:
+scp -P 2222 src/main.py root@176.109.83.84:/root/skurchev/workspace/wam-stack/src/
+ssh -p 2222 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose restart wam"
 ```
 
 ### Switching models
 
 ```bash
-# Run with UnifoLM
-WAM_MODEL=unifolm WAM_CHECKPOINT=/path/to/checkpoint \
-  docker compose -f compose.yml restart wam
-
-# Run with EVA
-WAM_MODEL=eva WAM_CHECKPOINT=/path/to/checkpoint \
-  docker compose -f compose.yml restart wam
-
-# Stub (walks forward, no model needed)
-WAM_MODEL=stub docker compose -f compose.yml restart wam
+# Set env in compose.yml or pass on restart:
+ssh -p 2222 root@176.109.83.84 "
+  cd /root/skurchev/workspace/wam-stack
+  WAM_MODEL=unifolm WAM_CHECKPOINT=/path/to/ckpt docker compose restart wam
+"
 ```
 
 ---
 
-## Stop / Reset
+## Monitoring
 
 ```bash
-# Stop everything
-./scripts/stop.sh
+# All containers
+ssh -p 2222 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose logs -f"
 
-# Stop and remove volumes
-docker compose -f compose.yml down -v
+# Individual
+docker compose logs -f wam
+docker compose logs -f isaac-sim
+docker compose logs -f gear-sonic
 
-# Rebuild WAM image (after changing Dockerfile)
-./scripts/start.sh --build-only wam
+# Health
+docker compose ps
 ```
 
----
-
-## Debug: exec into a container
-
-```bash
-# WAM container — inspect Python env, test imports
-docker compose -f compose.yml exec wam bash
-
-# Inside: test DDS
-python -c "import unitree_sdk2py; print('DDS ok')"
-
-# Isaac Sim container — inspect scene, check logs
-docker compose -f compose.yml exec isaac-sim bash
+Expected healthy state:
 ```
-
----
-
-## Pull latest code
-
-```bash
-# On server:
-ssh x32-techgov-GPU-01
-cd /root/skurchev/workspace/wam-stack
-
-git pull
-git submodule update --remote modules/gwbc   # update GEAR-SONIC if needed
-
-# Restart WAM to pick up src/ changes:
-docker compose -f compose.yml restart wam
+NAME               STATUS
+wam-gear-sonic     running (healthy)
+wam-isaac-sim      running (healthy)
+wam-inference      running
 ```
 
 ---
@@ -282,32 +198,26 @@ wam-stack/
 ├── compose.yml                  # 3 services: isaac-sim, gear-sonic, wam
 ├── docker/
 │   ├── isaac-sim/
-│   │   ├── Dockerfile.base      # heavy base: Isaac Sim 5.1 + Isaac Lab 2.3.2 (build once)
-│   │   ├── Dockerfile           # thin runtime layer (noVNC, pyzmq)
+│   │   ├── Dockerfile           # Isaac Sim 5.1 + Isaac Lab 2.3.2 + noVNC
 │   │   └── entrypoint.sh        # Xvfb + x11vnc + websockify → port 6080
 │   ├── gear-sonic/
-│   │   └── Dockerfile           # C++ TensorRT inference binary
+│   │   ├── Dockerfile           # FROM mws-sim-gear-sonic-policy:latest
+│   │   └── entrypoint.sh        # fixes x86_64 DDS lib path, enables lo multicast
 │   └── wam/
-│       └── Dockerfile           # CUDA 12.2 + Python 3.12 + torch + DDS
-├── sim/isaac/                   # Isaac Sim runtime (Python)
-│   ├── g1_sim.py                # main loop: InteractiveScene + SimulationContext
-│   ├── dds_bridge.py            # rt/lowstate publisher, rt/lowcmd subscriber
-│   ├── startup_support.py       # floating-base PD hold during init
-│   └── launch_g1.py             # AppLauncher entrypoint
+│       └── Dockerfile           # CUDA 12.2 + Python 3.10 + torch + cyclonedds==0.10.2
 ├── scripts/
-│   ├── start.sh                 # launch stack
+│   ├── deploy.sh                # ← MAIN SCRIPT: sync + start + show ports
+│   ├── start.sh                 # server-side launch (used by deploy.sh)
 │   ├── stop.sh                  # docker compose down
-│   ├── sync.sh                  # rsync to server
-│   ├── view.sh                  # SSH tunnel → http://localhost:6080
-│   └── isaac/launch_g1.sh       # conda activate + python launch_g1.py
-├── assets/robots/g1/            # G1 USD assets (g1_29dof_base.usd not in git — generate)
+│   ├── sync.sh                  # rsync only (no start)
+│   └── view.sh                  # SSH tunnel helper
 ├── modules/gwbc/                # submodule: GR00T-Kimodo (GEAR-SONIC + robot model data)
-└── src/                         # YOUR WAM code (hot-reload)
-    ├── main.py                  # control loop
-    ├── dds_interface.py         # DDS subscribe/publish
+└── src/                         # WAM code (bind-mounted, hot-reload)
+    ├── main.py                  # control loop: state → model → DDS command (10 Hz)
+    ├── dds_interface.py         # rt/lowstate subscriber + rt/run_command/cmd publisher
     └── models/
-        ├── unifolm.py           # UnifoLM-WMA-0 adapter
-        └── eva.py               # EVA adapter
+        ├── unifolm.py           # UnifoLM-WMA-0 adapter (stub — TODO)
+        └── eva.py               # EVA adapter (stub — TODO)
 ```
 
 ---
@@ -316,9 +226,9 @@ wam-stack/
 
 | Topic | Direction | Type | Rate | Content |
 |-------|-----------|------|------|---------|
-| `rt/lowstate` | Isaac Sim → WAM | `unitree_hg.msg.dds_.LowState_` | 50–200 Hz | 29-DOF joint pos/vel/torque + IMU |
+| `rt/lowstate` | Isaac Sim → WAM | `unitree_hg.msg.dds_.LowState_` | 50 Hz | 29-DOF joint pos/vel/torque + IMU |
 | `rt/lowcmd` | GEAR-SONIC → Isaac Sim | `unitree_hg.msg.dds_.LowCmd_` | 50 Hz | 29-DOF joint targets |
 | `rt/run_command/cmd` | WAM → GEAR-SONIC | `std_msgs.msg.dds_.String_` | 10 Hz | JSON `[vx, vy, wz, body_height]` |
 
-Your WAM reads `rt/lowstate`, does inference, publishes `rt/run_command/cmd`.  
+WAM reads `rt/lowstate`, runs inference, publishes `rt/run_command/cmd`.  
 GEAR-SONIC converts velocity commands into stable 29-DOF joint targets.

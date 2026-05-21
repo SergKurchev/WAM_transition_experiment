@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """DDS interface for WAM inference loop.
 
 Subscribes to rt/lowstate (robot joint state from Isaac Sim).
@@ -80,8 +82,6 @@ class DDSInterface:
         """Publish a velocity command to GEAR-SONIC."""
         payload = json.dumps([vx, vy, wz, body_height])
         if self._publisher is not None:
-            msg = String_()
-            msg.data = payload
-            self._publisher.Write(msg)
+            self._publisher.Write(String_(data=payload))
         else:
             print(f"[dds] stub cmd: {payload}", flush=True)

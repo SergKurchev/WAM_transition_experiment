@@ -13,4 +13,16 @@ sysctl -w net.core.rmem_default=67108864 2>/dev/null || true
 # always reflects the current process.
 rm -f /tmp/gear-sonic-ready
 
+# The upstream image ships aarch64 DDS libs in /usr/local/lib (wrong for x86_64 sim).
+# Use x86_64 .so files from the bind-mounted gear_sonic_deploy volume instead.
+# Create versioned symlinks (.so.0) on first start if they don't exist yet.
+DDS_X86=/opt/gear_sonic_deploy/thirdparty/unitree_sdk2/thirdparty/lib/x86_64
+if [ -d "${DDS_X86}" ]; then
+    [ -f "${DDS_X86}/libddsc.so"   ] && [ ! -e "${DDS_X86}/libddsc.so.0"   ] \
+        && ln -sf libddsc.so   "${DDS_X86}/libddsc.so.0"
+    [ -f "${DDS_X86}/libddscxx.so" ] && [ ! -e "${DDS_X86}/libddscxx.so.0" ] \
+        && ln -sf libddscxx.so "${DDS_X86}/libddscxx.so.0"
+    export LD_LIBRARY_PATH="${DDS_X86}:${LD_LIBRARY_PATH:-}"
+fi
+
 exec "$@"

@@ -207,6 +207,7 @@ class IsaacDdsBridge:
 
     def _open_shm_file(self, path: str, size: int) -> mmap.mmap:
         """Create or resize a SHM-backed file and return an mmap handle."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             os.ftruncate(fd, size)
