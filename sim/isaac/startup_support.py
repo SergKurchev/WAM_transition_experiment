@@ -16,10 +16,10 @@ Usage (inside g1_sim.run())::
         scene.update(dt=SIM_DT)
     support.check_and_release()
 
-Release: operator runs ``scripts/control.py drop``, which PUSHes a byte to
-``tcp://localhost:5558``.  The PULL listener sets a threading.Event; the
-wrench is then linearly ramped to zero over RELEASE_RAMP_STEPS sub-steps
-(1.0 s at sim_dt=0.005 s) to avoid PhysX stiff-contact buckling on landing.
+Release: call ``support.trigger_drop()`` from the main loop when GEAR-SONIC
+sends its first ``rt/lowcmd``.  The wrench is then linearly ramped to zero
+over RELEASE_RAMP_STEPS sub-steps (1.0 s at sim_dt=0.005 s) to avoid PhysX
+stiff-contact buckling on landing.
 
 Three hard-won fixes carried over from the reference implementation:
 1. Sign correction — restoring torque uses ``-KP_ANG * rotvec`` (not +).
@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import builtins as _builtins
 import threading
-from typing import Any, List, Optional
+from typing import Any, List
 
 import torch
 
@@ -41,14 +41,6 @@ def print(*args: Any, **kwargs: Any) -> None:  # noqa: A001 — intentional modu
     """Module-scoped ``print`` that always flushes so loop-rate diagnostics are live."""
     kwargs.setdefault("flush", True)
     _builtins.print(*args, **kwargs)
-
-try:
-    import zmq  # type: ignore
-except ImportError as _zmq_import_err:  # pragma: no cover
-    zmq = None  # type: ignore[assignment]
-    _ZMQ_IMPORT_ERROR = _zmq_import_err
-else:
-    _ZMQ_IMPORT_ERROR = None
 
 
 class IsaacStartupSupport:
@@ -77,9 +69,6 @@ class IsaacStartupSupport:
     # Ramp-down: 200 sub-steps × 0.005 s = 1.0 s gradual descent.
     RELEASE_RAMP_STEPS: int = 200
 
-    ZMQ_DROP_PORT: int = 5558
-    ZMQ_DROP_ENDPOINT: str = f"tcp://*:{ZMQ_DROP_PORT}"
-
     def __init__(
         self,
         scene: Any,
@@ -95,11 +84,6 @@ class IsaacStartupSupport:
         self._ramp_step: int = 0
 
         self._drop_event = threading.Event()
-        self._listener_shutdown = threading.Event()
-        self._zmq_ctx: Optional[Any] = None
-        self._zmq_socket: Optional[Any] = None
-        self._zmq_thread: Optional[threading.Thread] = None
-        self._start_drop_listener()
 
         robot = scene.articulations["robot"]
         root_state = robot.data.root_state_w[0].clone()
@@ -186,7 +170,7 @@ class IsaacStartupSupport:
         print(
             f"[IsaacStartupSupport] initialised — spawn_pos={spawn_pos_str}  "
             f"support_target_z={self._support_target_pos[2].item():.3f}  "
-            f"release=ZMQ-PULL tcp://*:{self.ZMQ_DROP_PORT}  "
+            f"release=trigger_drop() on first rt/lowcmd  "
             f"min_steps={self.RELEASE_MIN_STEPS}"
         )
 
@@ -248,6 +232,16 @@ class IsaacStartupSupport:
                 f"[IsaacStartupSupport] SUPPORT mode={_mode} step={self._step} "
                 f"root_z={root_z:.4f} drop_signal={_state}"
             )
+
+    def trigger_drop(self) -> None:
+        """Signal that the wrench should be released.
+
+        Call once from the main loop when GEAR-SONIC sends its first rt/lowcmd.
+        Idempotent — safe to call on every loop iteration once the condition is met.
+        """
+        if not self._drop_event.is_set():
+            print("[IsaacStartupSupport] drop triggered by first rt/lowcmd from GEAR-SONIC")
+            self._drop_event.set()
 
     def check_and_release(self) -> None:
         """Check drop signal once per control step (outside decimation loop). No-op once released."""
@@ -323,66 +317,13 @@ class IsaacStartupSupport:
         else:
             self._release()
 
-    def _restart_listener_thread(self) -> None:
-        """Spawn a new drop-listener thread on the already-bound socket."""
-        sock = self._zmq_socket
-        drop_event = self._drop_event
-        shutdown_event = self._listener_shutdown
-        port = self.ZMQ_DROP_PORT
-
-        def _listen() -> None:
-            poller = zmq.Poller()
-            poller.register(sock, zmq.POLLIN)
-            while not drop_event.is_set() and not shutdown_event.is_set():
-                try:
-                    socks = dict(poller.poll(500))
-                except (zmq.ContextTerminated, zmq.ZMQError):
-                    return
-                if sock in socks:
-                    try:
-                        sock.recv(flags=zmq.NOBLOCK)
-                    except zmq.Again:
-                        continue
-                    except zmq.ZMQError:
-                        return
-                    print(f"[IsaacStartupSupport] drop signal received on tcp://*:{port}")
-                    drop_event.set()
-                    return
-
-        self._zmq_thread = threading.Thread(
-            target=_listen,
-            name="IsaacStartupSupport-drop-listener",
-            daemon=True,
-        )
-        self._zmq_thread.start()
-
-    def _start_drop_listener(self) -> None:
-        if zmq is None:
-            raise RuntimeError(
-                f"[IsaacStartupSupport] pyzmq required but import failed: "
-                f"{_ZMQ_IMPORT_ERROR}"
-            )
-        self._zmq_ctx = zmq.Context.instance()
-        self._zmq_socket = self._zmq_ctx.socket(zmq.PULL)
-        self._zmq_socket.setsockopt(zmq.LINGER, 0)
-        self._zmq_socket.bind(self.ZMQ_DROP_ENDPOINT)
-        self._restart_listener_thread()
-
     def rearm(self) -> None:
-        """Reset support state and re-listen for the next drop signal.
+        """Reset support state for the next episode.
 
         Caller must have already teleported the robot to its spawn pose (so that
         the freshly-read root state reflects the new spawn position).
-        The ZMQ socket stays bound — only the polling thread is restarted.
+        The next trigger_drop() call will re-release the wrench.
         """
-        if self._zmq_thread is not None and self._zmq_thread.is_alive():
-            # Signal shutdown so the listener exits even if drop never fired
-            # (rearm called while support is still active). Without this the
-            # old thread would keep polling the socket alongside the new one.
-            self._listener_shutdown.set()
-            self._zmq_thread.join(timeout=2.0)
-        self._listener_shutdown.clear()
-
         self._drop_event.clear()
         self._released = False
         self._ramping = False
@@ -399,8 +340,6 @@ class IsaacStartupSupport:
             self._spawn_quat[0], -self._spawn_quat[1],
             -self._spawn_quat[2], -self._spawn_quat[3],
         ])
-
-        self._restart_listener_thread()
 
         spawn_pos_str = [f"{v:.3f}" for v in self._spawn_pos.tolist()]
         print(

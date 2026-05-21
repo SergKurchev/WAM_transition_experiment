@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # reset_sim.sh — teleport robot back to spawn without restarting any container.
 #
-# Sends a one-byte ZMQ PUSH to the reset listener in g1_sim.py (tcp://localhost:5559).
+# Sends a one-byte ZMQ PUSH to the reset listener in g1_sim.py (tcp://localhost:6559).
 # Isaac Sim responds: _reset_robot() + support.rearm() — robot stands up again.
 #
 # Usage:
@@ -9,7 +9,7 @@
 #
 # Equivalent one-liner (no script needed):
 #   ssh x32-techgov-GPU-02 "docker exec wam-isaac-sim python3 -c \
-#       \"import zmq; s=zmq.Context().socket(zmq.PUSH); s.connect('tcp://localhost:5559'); s.send(b'r')\""
+#       \"import zmq; s=zmq.Context().socket(zmq.PUSH); s.connect('tcp://localhost:6559'); s.send(b'r')\""
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ import zmq
 s = zmq.Context().socket(zmq.PUSH)
 s.setsockopt(zmq.LINGER, 0)
 s.setsockopt(zmq.SNDTIMEO, 2000)
-s.connect('tcp://localhost:5559')
+s.connect('tcp://localhost:6559')
 s.send(b'r')
 s.close()
 print('reset signal sent', flush=True)

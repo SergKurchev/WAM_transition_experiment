@@ -587,10 +587,10 @@ def run(
     _reset_zmq_ctx = _zmq.Context.instance()
     _reset_zmq_sock = _reset_zmq_ctx.socket(_zmq.PULL)
     _reset_zmq_sock.setsockopt(_zmq.LINGER, 0)
-    _reset_zmq_sock.bind("tcp://*:5559")
+    _reset_zmq_sock.bind("tcp://*:6559")
     _reset_zmq_poller = _zmq.Poller()
     _reset_zmq_poller.register(_reset_zmq_sock, _zmq.POLLIN)
-    _probe("reset-sim listener bound on tcp://*:5559")
+    _probe("reset-sim listener bound on tcp://*:6559")
 
     _probe(f"DDS bridge + support ready; entering loop; app.is_running={simulation_app.is_running()}")
 
@@ -655,6 +655,7 @@ def run(
             q_hw, dq_hw = bridge.read_cmd(device=robot.device)
             if q_hw is not None:
                 _cmd_recv_since_log += 1
+                support.trigger_drop()
             else:
                 _cmd_miss_since_log += 1
             # While the startup-support wrench is holding the floating base,

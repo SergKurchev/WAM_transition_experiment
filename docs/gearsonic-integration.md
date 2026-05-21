@@ -37,7 +37,7 @@ This handler is NOT in the open-source gwbc source tree — it is a MWS-owned ex
 2. **Auto-start sequence** — 5 seconds after "Init Done" prints, automatically:
    - Sets `operator_state.start = true`  → GEAR-SONIC enters CONTROL state
    - Sets `planner_state.enabled = true` → locomotion planner activates
-   - Sends ZMQ PUSH byte to `localhost:5558` → Isaac startup-support wrench releases
+   - Sends ZMQ PUSH byte to `localhost:5558` → **we do not listen here** (wam-stack uses rt/lowcmd detection instead)
 
    **No manual `control.py start-control` or `drop` commands are needed.**
 
@@ -54,7 +54,7 @@ t=A        GEAR-SONIC: "Init Done" → writes /tmp/gear-sonic-ready
 t=A+5s     DDSInputHandler auto-trigger:
            1. Enter CONTROL state
            2. Enable planner
-           3. ZMQ PUSH → localhost:5558 → wrench releases
+           3. ZMQ PUSH → localhost:5558 (wam-stack ignores; wrench released by rt/lowcmd detection)
 
 t=A+5s+ε   Robot standing freely, GEAR-SONIC tracking MovementState
            WAM must already be publishing rt/run_command/cmd by this point
@@ -176,8 +176,12 @@ height   = -1.0                    # use policy default
 
 ## ZMQ Ports Summary
 
-| Port | Direction | Purpose |
-|------|-----------|---------|
-| 5556 | PUB → SUB | GEAR-SONIC ZMQ Manager: command/planner/pose topics (manual ops only) |
-| 5558 | PUSH → PULL | Isaac startup-support drop (DDSInputHandler sends here automatically) |
-| 5559 | PUSH → PULL | Isaac reset-sim (scripts/reset_sim.sh) |
+| Port | Direction | Purpose | Owner |
+|------|-----------|---------|-------|
+| 5556 | PUB → SUB | GEAR-SONIC ZMQ Manager: command/planner/pose (manual ops) | GEAR-SONIC binary |
+| 5558 | PUSH → PULL | DDSInputHandler drop signal (sent by binary, **wam-stack does not bind this port**) | GEAR-SONIC binary → /dev/null |
+| 6559 | PUSH → PULL | Isaac reset-sim (`scripts/reset_sim.sh` → `g1_sim.py`) | wam-stack |
+
+**Wrench drop mechanism (wam-stack):** Isaac detects the first `rt/lowcmd` from GEAR-SONIC
+and calls `support.trigger_drop()` internally — no ZMQ port needed on our side.
+GEAR-SONIC tries to push to 5558 (silently fails); we ignore it.
