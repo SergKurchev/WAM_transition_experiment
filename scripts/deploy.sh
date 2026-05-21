@@ -18,6 +18,11 @@ SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
 REMOTE_DIR="/root/skurchev/workspace/wam-stack"
 SSH_KEY="$HOME/.ssh/id_ed25519"
+# WSL fallback: key lives in Windows home, not Linux home
+if [ ! -f "$SSH_KEY" ]; then
+    WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" 2>/dev/null || true)
+    [ -n "$WIN_HOME" ] && SSH_KEY="$WIN_HOME/.ssh/id_ed25519"
+fi
 LOCAL_NOVNC_PORT="6181"   # local port for noVNC tunnel (6180 often busy on Windows)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -18,6 +18,11 @@ SERVER_PORT="2222"
 SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
 SSH_KEY="$HOME/.ssh/id_ed25519"
+# WSL fallback: key lives in Windows home, not Linux home
+if [ ! -f "$SSH_KEY" ]; then
+    WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" 2>/dev/null || true)
+    [ -n "$WIN_HOME" ] && SSH_KEY="$WIN_HOME/.ssh/id_ed25519"
+fi
 
 SSH="ssh -p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
