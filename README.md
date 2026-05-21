@@ -222,6 +222,25 @@ wam-stack/
 
 ---
 
+## Port Assignments
+
+| Port | Protocol | Direction | Purpose | Owner |
+|------|----------|-----------|---------|-------|
+| **5991** | VNC (RFB) | server → client | x11vnc virtual display | wam-isaac-sim |
+| **6180** | HTTP/WS | server → browser | noVNC web viewer | wam-isaac-sim |
+| **6559** | ZMQ PULL | local | Isaac reset-sim signal (`scripts/reset_sim.sh`) | wam-isaac-sim |
+| **5556** | ZMQ PUB | GEAR-SONIC → ops | manual control commands (debug only) | wam-gear-sonic |
+
+**noVNC tunnel (run locally):**
+```bash
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
+# then open: http://localhost:6181
+```
+
+**Ports NOT used by wam-stack:** 5558, 5559, 5900, 5901, 6080, 6081.
+
+---
+
 ## DDS Interface Reference
 
 | Topic | Direction | Type | Rate | Content |
