@@ -51,4 +51,4 @@ print('reset signal sent', flush=True)
 \""
 
 echo -e "${G}  ✓${N} Done — robot teleported to spawn, startup support rearmed."
-echo -e "     Watch it stand up: http://localhost:6081"
+echo -e "     Watch it stand up: http://localhost:6181"

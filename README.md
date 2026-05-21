@@ -53,10 +53,10 @@ bash scripts/deploy.sh --reset
 Then open a **new terminal** and run the tunnel:
 
 ```bash
-ssh -N -L 6081:localhost:6080 x32-techgov-GPU-02
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
 ```
 
-Open browser: **http://localhost:6081**
+Open browser: **http://localhost:6181**
 
 ---
 
@@ -111,22 +111,22 @@ cp -r /root/skurchev/workspace/mws-dimos/modules/gwbc/gear_sonic_deploy/policy \
 ## Visual Monitoring (noVNC)
 
 Isaac Sim renders to a virtual display (Xvfb) inside its container.
-noVNC serves it over port 6080 on the server.
+noVNC serves it over port 6180 on the server.
 
 ### Open the tunnel (local machine, new terminal)
 
 ```bash
-ssh -N -L 6081:localhost:6080 x32-techgov-GPU-02
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
 ```
 
-Keep this terminal open. Then open: **http://localhost:6081**
+Keep this terminal open. Then open: **http://localhost:6181**
 
-> Port 6080 is often busy on Windows. Use 6081 locally (maps to 6080 on server).
+> Port 6180 is often busy on Windows. Use 6181 locally (maps to 6180 on server).
 
 ### Verify the tunnel works
 
 ```bash
-curl -s http://localhost:6081 | head -3
+curl -s http://localhost:6181 | head -3
 # Expected: <!DOCTYPE html> ...
 ```
 
@@ -134,7 +134,7 @@ curl -s http://localhost:6081 | head -3
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `bind: Permission denied` | Local port 6080 is busy | Use 6081: `ssh -N -L 6081:localhost:6080 ...` |
+| `bind: Permission denied` | Local port 6180 is busy | Use 6181: `ssh -N -L 6181:localhost:6180 ...` |
 | `channel: open failed: connect failed` | Stack not running | Run `bash scripts/deploy.sh` first |
 | noVNC loads, black screen | Isaac Sim still warming up | Wait 2–5 min |
 | Robot is lying down | GEAR-SONIC lost connection briefly | Run `bash scripts/deploy.sh --reset` |
@@ -199,7 +199,7 @@ wam-stack/
 ├── docker/
 │   ├── isaac-sim/
 │   │   ├── Dockerfile           # Isaac Sim 5.1 + Isaac Lab 2.3.2 + noVNC
-│   │   └── entrypoint.sh        # Xvfb + x11vnc + websockify → port 6080
+│   │   └── entrypoint.sh        # Xvfb + x11vnc + websockify → port 6180
 │   ├── gear-sonic/
 │   │   ├── Dockerfile           # FROM mws-sim-gear-sonic-policy:latest
 │   │   └── entrypoint.sh        # fixes x86_64 DDS lib path, enables lo multicast

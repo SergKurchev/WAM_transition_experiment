@@ -18,7 +18,7 @@ SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
 REMOTE_DIR="/root/skurchev/workspace/wam-stack"
 SSH_KEY="$HOME/.ssh/id_ed25519"
-LOCAL_NOVNC_PORT="6081"   # local port for noVNC tunnel (6080 often busy on Windows)
+LOCAL_NOVNC_PORT="6181"   # local port for noVNC tunnel (6180 often busy on Windows)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WAM_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -100,12 +100,39 @@ $SSH "$REMOTE" "
     find $REMOTE_DIR/scripts -name '*.sh' -exec sed -i 's/\r//' {} + 2>/dev/null || true
 " && ok "Line endings OK"
 
-# ── 3. Rebuild WAM image (optional) ──────────────────────────────────────────
+# ── 3. Rebuild check + WAM image ─────────────────────────────────────────────
+hdr "WAM image"
+if [[ "$BUILD" != true ]]; then
+    IMAGE_EXISTS=$($SSH "$REMOTE" "docker images -q wam-inference:latest 2>/dev/null" 2>/dev/null || echo "")
+    CURRENT_HASH=$($SSH "$REMOTE" "sha256sum $REMOTE_DIR/docker/wam/Dockerfile 2>/dev/null | cut -d' ' -f1" 2>/dev/null || echo "")
+    STORED_HASH=$($SSH "$REMOTE"  "cat $REMOTE_DIR/.wam_build_hash 2>/dev/null || echo ''" 2>/dev/null || echo "")
+
+    if [[ -z "$IMAGE_EXISTS" ]]; then
+        warn "wam-inference image not found — first build required (~10 min)"
+        echo -n "  Build now? [Y/n] "
+        read -r REPLY
+        if [[ -z "$REPLY" || "$REPLY" =~ ^[Yy]$ ]]; then
+            BUILD=true
+        else
+            err "Cannot start without image. Run: bash scripts/deploy.sh --build"
+            exit 1
+        fi
+    elif [[ -z "$STORED_HASH" || "$CURRENT_HASH" != "$STORED_HASH" ]]; then
+        warn "docker/wam/Dockerfile changed since last build"
+        echo "  current: ${CURRENT_HASH:0:12}...  last build: ${STORED_HASH:0:12}${STORED_HASH:+...}${STORED_HASH:-  (never recorded)}"
+        echo -n "  Rebuild WAM image? [y/N] "
+        read -r REPLY
+        [[ "$REPLY" =~ ^[Yy]$ ]] && BUILD=true || ok "Skipping rebuild — using existing image"
+    else
+        ok "WAM image up-to-date (Dockerfile unchanged since last build)"
+    fi
+fi
+
 if [[ "$BUILD" == true ]]; then
-    hdr "Build WAM image"
-    warn "This takes ~10 min (downloading torch + building CycloneDDS)"
-    $SSH "$REMOTE" "cd $REMOTE_DIR && docker compose build wam 2>&1 | tail -10"
-    ok "WAM image rebuilt"
+    warn "Building WAM image — ~10 min (torch + CycloneDDS from source)"
+    $SSH "$REMOTE" "cd $REMOTE_DIR && docker compose build wam 2>&1 | tail -15"
+    $SSH "$REMOTE" "sha256sum $REMOTE_DIR/docker/wam/Dockerfile | cut -d' ' -f1 > $REMOTE_DIR/.wam_build_hash"
+    ok "WAM image rebuilt + hash stored"
 fi
 
 # ── 4. Start stack ────────────────────────────────────────────────────────────
@@ -147,11 +174,11 @@ hdr "Status"
 $SSH "$REMOTE" "docker ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null | grep -E 'NAMES|wam'"
 
 echo ""
-NOVNC=$($SSH "$REMOTE" "ss -tlnp 2>/dev/null | grep ':6080'" 2>/dev/null || echo "")
+NOVNC=$($SSH "$REMOTE" "ss -tlnp 2>/dev/null | grep ':6180'" 2>/dev/null || echo "")
 if [[ -n "$NOVNC" ]]; then
-    ok "noVNC listening on server :6080"
+    ok "noVNC listening on server :6180"
 else
-    warn "noVNC not yet on :6080 (Isaac Sim may still be loading — wait 30s)"
+    warn "noVNC not yet on :6180 (Isaac Sim may still be loading — wait 30s)"
 fi
 
 WAM_LOG=$($SSH "$REMOTE" "docker logs wam-inference --tail=2 2>&1" 2>/dev/null || echo "")
@@ -166,7 +193,7 @@ echo ""
 echo -e "${G}┌─────────────────────────────────────────────────────────┐${N}"
 echo -e "${G}│  Visual monitoring — run in a NEW terminal:             │${N}"
 echo -e "${G}│                                                         │${N}"
-echo -e "${G}│  ssh -N -L ${LOCAL_NOVNC_PORT}:localhost:6080 x32-techgov-GPU-02   │${N}"
+echo -e "${G}│  ssh -N -L ${LOCAL_NOVNC_PORT}:localhost:6180 x32-techgov-GPU-02   │${N}"
 echo -e "${G}│  Then open:  http://localhost:${LOCAL_NOVNC_PORT}                  │${N}"
 echo -e "${G}│                                                         │${N}"
 echo -e "${G}│  To reset simulation (robot fell — fast, no restart):   │${N}"

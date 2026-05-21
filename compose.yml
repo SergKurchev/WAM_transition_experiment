@@ -5,9 +5,9 @@
 #   scripts/start.sh --scene /path/to/scene.usd        # with scene
 #   scripts/start.sh --build                           # rebuild wam image then start
 #
-# Visual monitoring: noVNC on port 6080 (virtual display inside isaac-sim container).
-# SSH tunnel: ssh -L 6080:localhost:6080 x32-techgov-GPU-01
-# Then open:  http://localhost:6080
+# Visual monitoring: noVNC on port 6180 (virtual display inside isaac-sim container).
+# SSH tunnel: ssh -L 6180:localhost:6180 x32-techgov-GPU-01
+# Then open:  http://localhost:6180
 #
 # Hot-reload WAM code:  edit src/ → sync → docker compose restart wam
 
@@ -64,8 +64,8 @@ services:
   # --------------------------------------------------------------------------
   # Isaac Sim — bare InteractiveScene + SimulationContext loop.
   # Publishes: rt/lowstate  |  Subscribes: rt/lowcmd
-  # Visual monitoring via noVNC on port 6080 (Xvfb + x11vnc + websockify).
-  # SSH tunnel: ssh -L 6080:localhost:6080 x32-techgov-GPU-01
+  # Visual monitoring via noVNC on port 6180 (Xvfb + x11vnc + websockify).
+  # SSH tunnel: ssh -L 6180:localhost:6180 x32-techgov-GPU-01
   # --------------------------------------------------------------------------
   isaac-sim:
     build:

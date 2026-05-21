@@ -13,16 +13,16 @@ Xvfb :99 -screen 0 1920x1080x24 +extension GLX -ac &
 sleep 1
 export DISPLAY=:99
 
-x11vnc -display :99 -nopw -forever -shared -bg -quiet -noxdamage
+x11vnc -display :99 -rfbport 5991 -nopw -forever -shared -bg -quiet -noxdamage
 
 cp /workspace/wam-stack/docker/isaac-sim/novnc-index.html /usr/share/novnc/index.html
 
-pkill -f "websockify.*6080" 2>/dev/null || true
-if ss -ltn "( sport = :6080 )" | grep -q LISTEN; then
-    echo "[entrypoint] WARNING: noVNC port 6080 already in use" >&2
+pkill -f "websockify.*6180" 2>/dev/null || true
+if ss -ltn "( sport = :6180 )" | grep -q LISTEN; then
+    echo "[entrypoint] WARNING: noVNC port 6180 already in use" >&2
 else
-    echo "[entrypoint] noVNC on port 6080"
-    websockify --web=/usr/share/novnc 6080 localhost:5900 &
+    echo "[entrypoint] noVNC on port 6180"
+    websockify --web=/usr/share/novnc 6180 localhost:5991 &
 fi
 
 # ── Log file setup: tee stdout+stderr to file AND container stdout ─────────────

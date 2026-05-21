@@ -13,7 +13,7 @@ All three containers run on GPU-02 (`176.109.83.84:2222`).
 | `wam-isaac-sim` | healthy | G1 robot, physics ~35 Hz, publishes `rt/lowstate` |
 | `wam-gear-sonic` | healthy | TRT engines loaded, WBC running |
 | `wam-inference` | running | DDS initialized, receives `rt/lowstate`, control loop active |
-| noVNC port 6080 | listening | tunnel: `ssh -N -L 6081:localhost:6080 x32-techgov-GPU-02` |
+| noVNC port 6180 | listening | tunnel: `ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02` |
 
 ---
 
@@ -32,9 +32,9 @@ bash scripts/deploy.sh --reset
 
 Then open tunnel in a new terminal:
 ```bash
-ssh -N -L 6081:localhost:6080 x32-techgov-GPU-02
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
 ```
-Browser: **http://localhost:6081**
+Browser: **http://localhost:6181**
 
 ---
 
