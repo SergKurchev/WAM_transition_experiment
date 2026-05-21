@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        xvfb x11vnc novnc websockify iproute2 procps zenity \
+        xvfb x11vnc novnc websockify iproute2 procps zenity xterm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN conda run --no-capture-output -n unitree_sim_env \

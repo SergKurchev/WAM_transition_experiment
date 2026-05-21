@@ -13,6 +13,9 @@ import time
 
 from dds_interface import DDSInterface
 
+STATUS_LOG_INTERVAL = 5.0  # seconds between periodic status lines
+
+
 # ── model registry ────────────────────────────────────────────────────────────
 
 def load_model(name: str, checkpoint: str | None):
@@ -44,26 +47,48 @@ def main():
     checkpoint  = os.environ.get("WAM_CHECKPOINT") or None
     dds_iface   = os.environ.get("DDS_IFACE", "lo")
 
-    print(f"[main] WAM_MODEL={model_name}  checkpoint={checkpoint}  DDS_IFACE={dds_iface}", flush=True)
+    print(f"[WAM] starting  model={model_name}  checkpoint={checkpoint}  iface={dds_iface}", flush=True)
 
     dds = DDSInterface(iface=dds_iface)
     dds.init()
 
     model = load_model(model_name, checkpoint)
-    print("[main] Model loaded. Waiting for first robot state...", flush=True)
+    print(f"[WAM] model loaded ({model_name}). Waiting for rt/lowstate from Isaac Sim...", flush=True)
 
-    # Wait until Isaac Sim publishes at least one lowstate
+    wait_start = time.time()
+    last_wait_log = wait_start
     while dds.get_state() is None:
+        now = time.time()
+        if now - last_wait_log >= 5.0:
+            print(f"[WAM] still waiting for rt/lowstate  ({now - wait_start:.0f}s elapsed)...", flush=True)
+            last_wait_log = now
         time.sleep(0.1)
-    print("[main] Robot state received. Starting control loop.", flush=True)
+
+    print(f"[WAM] rt/lowstate received  ({time.time() - wait_start:.1f}s wait). Control loop starting at {CONTROL_HZ} Hz.", flush=True)
 
     dt = 1.0 / CONTROL_HZ
+    loop_count = 0
+    last_status_t = time.time()
+    last_cmd = (0.0, 0.0, 0.0)
+
     while True:
         t0 = time.time()
 
         state = dds.get_state()
         vx, vy, wz = model(state)
         dds.send_command(vx, vy, wz, body_height=0.0)
+        last_cmd = (vx, vy, wz)
+        loop_count += 1
+
+        now = time.time()
+        if now - last_status_t >= STATUS_LOG_INTERVAL:
+            age = now - state.timestamp
+            print(
+                f"[WAM] loop={loop_count}  cmd=[vx={last_cmd[0]:.2f} vy={last_cmd[1]:.2f} wz={last_cmd[2]:.2f}]"
+                f"  state_age={age*1000:.0f}ms  q0={state.q[0]:.3f}",
+                flush=True,
+            )
+            last_status_t = now
 
         elapsed = time.time() - t0
         time.sleep(max(0.0, dt - elapsed))

@@ -99,7 +99,7 @@ fi
 hdr "Status"
 sleep 3
 $SSH "$REMOTE" "
-    echo '  commit: '$(cd $REMOTE_DIR && git log -1 --format='%h %s')
+    echo '  commit: '\$(cd $REMOTE_DIR && git log -1 --format='%h %s')
     docker ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null | grep -E 'NAMES|wam' || true
 "
 

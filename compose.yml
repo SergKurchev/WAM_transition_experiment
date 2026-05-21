@@ -53,6 +53,7 @@ services:
     shm_size: '2gb'
     stdin_open: true
     tty: true
+    restart: on-failure
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/gear-sonic-ready"]
       interval: 5s
@@ -137,6 +138,4 @@ services:
     command: ["python", "/workspace/wam/main.py"]
     depends_on:
       isaac-sim:
-        condition: service_healthy
-      gear-sonic:
         condition: service_healthy
