@@ -30,8 +30,8 @@ No DimOS, no LCM, no bridge.
 
 | Alias | IP | Port | GPU |
 |-------|----|------|-----|
-| `x32-techgov-GPU-01` | 176.109.83.84 | 2221 | A100 #0 |
-| `x32-techgov-GPU-02` | 176.109.83.84 | 2222 | A100 #1 ← **wam-stack lives here** |
+| `x32-techgov-GPU-01` | 176.109.83.84 | 2221 | A100 #0 ← **wam-stack lives here** |
+| `x32-techgov-GPU-02` | 176.109.83.84 | 2222 | A100 #1 |
 
 ---
 
@@ -53,7 +53,7 @@ bash scripts/deploy.sh --reset
 Then open a **new terminal** and run the tunnel:
 
 ```bash
-ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-01
 ```
 
 Open browser: **http://localhost:6181**
@@ -65,7 +65,7 @@ Open browser: **http://localhost:6181**
 ### 1. Clone with submodules
 
 ```bash
-ssh x32-techgov-GPU-02
+ssh x32-techgov-GPU-01
 cd /root/skurchev/workspace
 
 git clone --recurse-submodules \
@@ -84,7 +84,7 @@ cyclonedds 0.10.2 + Python 3.10) and installs PyTorch 2.7 + CUDA 12.8.
 > **Why 0.10.2?** GEAR-SONIC uses CycloneDDS 0.10.x. Using 11.x in WAM crashes
 > GEAR-SONIC with a segfault in `ddsi_xt_type_init_impl` during DDS discovery.
 
-### 3. Server-only binary files (already in place on GPU-02)
+### 3. Server-only binary files (already in place on GPU-01)
 
 These large files are NOT in git. They live at:
 
@@ -100,10 +100,12 @@ modules/gwbc/gear_sonic_deploy/
     └── libddscxx.so / libddscxx.so.0
 ```
 
-If they're missing, copy from mws-dimos on the same server:
+If they're missing, copy from GPU-02:
 ```bash
-cp -r /root/skurchev/workspace/mws-dimos/modules/gwbc/gear_sonic_deploy/policy \
-      /root/skurchev/workspace/wam-stack/modules/gwbc/gear_sonic_deploy/
+# From local machine — copies ONNX files from GPU-02 to GPU-01 via local network
+ssh -A -p 2222 root@176.109.83.84 \
+  "docker save mws-sim-gear-sonic-policy:latest | gzip | \
+   ssh -A -p 2221 root@176.109.83.84 'docker load'"
 ```
 
 ---
@@ -116,7 +118,7 @@ noVNC serves it over port 6180 on the server.
 ### Open the tunnel (local machine, new terminal)
 
 ```bash
-ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-01
 ```
 
 Keep this terminal open. Then open: **http://localhost:6181**
@@ -150,15 +152,15 @@ curl -s http://localhost:6181 | head -3
 bash scripts/deploy.sh          # syncs and restarts everything
 
 # Or if only WAM changed and stack is already up:
-scp -P 2222 src/main.py root@176.109.83.84:/root/skurchev/workspace/wam-stack/src/
-ssh -p 2222 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose restart wam"
+scp -P 2221 src/main.py root@176.109.83.84:/root/skurchev/workspace/wam-stack/src/
+ssh -p 2221 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose restart wam"
 ```
 
 ### Switching models
 
 ```bash
 # Set env in compose.yml or pass on restart:
-ssh -p 2222 root@176.109.83.84 "
+ssh -p 2221 root@176.109.83.84 "
   cd /root/skurchev/workspace/wam-stack
   WAM_MODEL=unifolm WAM_CHECKPOINT=/path/to/ckpt docker compose restart wam
 "
@@ -170,7 +172,7 @@ ssh -p 2222 root@176.109.83.84 "
 
 ```bash
 # All containers
-ssh -p 2222 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose logs -f"
+ssh -p 2221 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose logs -f"
 
 # Individual
 docker compose logs -f wam
@@ -233,7 +235,7 @@ wam-stack/
 
 **noVNC tunnel (run locally):**
 ```bash
-ssh -N -L 6181:localhost:6180 x32-techgov-GPU-02
+ssh -N -L 6181:localhost:6180 x32-techgov-GPU-01
 # then open: http://localhost:6181
 ```
 

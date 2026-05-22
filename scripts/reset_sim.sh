@@ -8,13 +8,13 @@
 #   bash scripts/reset_sim.sh
 #
 # Equivalent one-liner (no script needed):
-#   ssh x32-techgov-GPU-02 "docker exec wam-isaac-sim python3 -c \
+#   ssh x32-techgov-GPU-01 "docker exec wam-isaac-sim python3 -c \
 #       \"import zmq; s=zmq.Context().socket(zmq.PUSH); s.connect('tcp://localhost:6559'); s.send(b'r')\""
 
 set -euo pipefail
 
 SERVER_HOST="176.109.83.84"
-SERVER_PORT="2222"
+SERVER_PORT="2221"
 SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
 SSH_KEY="$HOME/.ssh/id_ed25519"
@@ -22,6 +22,13 @@ SSH_KEY="$HOME/.ssh/id_ed25519"
 if [ ! -f "$SSH_KEY" ]; then
     WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" 2>/dev/null || true)
     [ -n "$WIN_HOME" ] && SSH_KEY="$WIN_HOME/.ssh/id_ed25519"
+fi
+# WSL /mnt/ fix: NTFS mounts have 0777 perms; SSH refuses them — copy to tmp with 600
+if [[ "$SSH_KEY" == /mnt/* ]]; then
+    _TMP_KEY=$(mktemp /tmp/id_ed25519.XXXXXX)
+    cp "$SSH_KEY" "$_TMP_KEY" && chmod 600 "$_TMP_KEY"
+    SSH_KEY="$_TMP_KEY"
+    trap 'rm -f "$_TMP_KEY"' EXIT
 fi
 
 SSH="ssh -p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10"
@@ -45,12 +52,14 @@ fi
 echo -e "${Y}  →${N} Sending reset signal to Isaac Sim..."
 
 $SSH "$REMOTE" "docker exec wam-isaac-sim conda run -n unitree_sim_env python3 -c \"
-import zmq
+import zmq, time
 s = zmq.Context().socket(zmq.PUSH)
-s.setsockopt(zmq.LINGER, 0)
+s.setsockopt(zmq.LINGER, 2000)
 s.setsockopt(zmq.SNDTIMEO, 2000)
 s.connect('tcp://localhost:6559')
+time.sleep(0.05)
 s.send(b'r')
+time.sleep(0.1)
 s.close()
 print('reset signal sent', flush=True)
 \""

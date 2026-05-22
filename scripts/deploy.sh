@@ -13,7 +13,7 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SERVER_HOST="176.109.83.84"
-SERVER_PORT="2222"
+SERVER_PORT="2221"
 SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
 REMOTE_DIR="/root/skurchev/workspace/wam-stack"
@@ -22,6 +22,13 @@ SSH_KEY="$HOME/.ssh/id_ed25519"
 if [ ! -f "$SSH_KEY" ]; then
     WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" 2>/dev/null || true)
     [ -n "$WIN_HOME" ] && SSH_KEY="$WIN_HOME/.ssh/id_ed25519"
+fi
+# WSL /mnt/ fix: NTFS mounts have 0777 perms; SSH refuses them — copy to tmp with 600
+if [[ "$SSH_KEY" == /mnt/* ]]; then
+    _TMP_KEY=$(mktemp /tmp/id_ed25519.XXXXXX)
+    cp "$SSH_KEY" "$_TMP_KEY" && chmod 600 "$_TMP_KEY"
+    SSH_KEY="$_TMP_KEY"
+    trap 'rm -f "$_TMP_KEY"' EXIT
 fi
 LOCAL_NOVNC_PORT="6181"   # local port for noVNC tunnel (6180 often busy on Windows)
 
@@ -198,7 +205,7 @@ echo ""
 echo -e "${G}┌─────────────────────────────────────────────────────────┐${N}"
 echo -e "${G}│  Visual monitoring — run in a NEW terminal:             │${N}"
 echo -e "${G}│                                                         │${N}"
-echo -e "${G}│  ssh -N -L ${LOCAL_NOVNC_PORT}:localhost:6180 x32-techgov-GPU-02   │${N}"
+echo -e "${G}│  ssh -N -L ${LOCAL_NOVNC_PORT}:localhost:6180 x32-techgov-GPU-01   │${N}"
 echo -e "${G}│  Then open:  http://localhost:${LOCAL_NOVNC_PORT}                  │${N}"
 echo -e "${G}│                                                         │${N}"
 echo -e "${G}│  To reset simulation (robot fell — fast, no restart):   │${N}"
