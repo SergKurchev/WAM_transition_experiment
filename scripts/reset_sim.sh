@@ -42,21 +42,21 @@ if ! ssh-add -l &>/dev/null 2>&1; then
 fi
 
 # ── Check container is running ────────────────────────────────────────────────
-STATUS=$($SSH "$REMOTE" "docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | grep wam-isaac-sim" 2>/dev/null || true)
+STATUS=$($SSH "$REMOTE" "docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | grep mws-sim-isaac" 2>/dev/null || true)
 if [[ -z "$STATUS" ]]; then
-    echo -e "${R}  ✗${N} wam-isaac-sim is not running. Start the stack first: bash scripts/deploy.sh"
+    echo -e "${R}  ✗${N} mws-sim-isaac is not running. Start the stack first: bash scripts/sim_start.sh"
     exit 1
 fi
 
 # ── Send reset signal ─────────────────────────────────────────────────────────
 echo -e "${Y}  →${N} Sending reset signal to Isaac Sim..."
 
-$SSH "$REMOTE" "docker exec wam-isaac-sim conda run -n unitree_sim_env python3 -c \"
+$SSH "$REMOTE" "docker exec mws-sim-isaac /opt/conda/envs/unitree_sim_env/bin/python3 -c \"
 import zmq, time
 s = zmq.Context().socket(zmq.PUSH)
 s.setsockopt(zmq.LINGER, 2000)
 s.setsockopt(zmq.SNDTIMEO, 2000)
-s.connect('tcp://localhost:6559')
+s.connect('tcp://localhost:5559')
 time.sleep(0.05)
 s.send(b'r')
 time.sleep(0.1)
