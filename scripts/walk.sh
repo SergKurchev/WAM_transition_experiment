@@ -16,7 +16,6 @@ SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
 MWS_DIR="/root/skurchev/workspace/mws-dimos"
 SSH_KEY="$HOME/.ssh/id_ed25519"
-UV="$HOME/.cache/uv/archive-v0/Ut-jV_1sYOe6u-ol2xGx5/uv-0.9.7.data/scripts/uv"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 
@@ -45,6 +44,6 @@ fi
 
 echo -e "${Y}  →${N} Sending '${SCENARIO}' command to robot... (Ctrl+C to stop early)"
 
-$SSH "cd $MWS_DIR && $UV run python tools/control/dds_cmd_publisher.py lo $SCENARIO $EXTRA 2>&1"
+$SSH "UV=\$(find /root/.cache/uv -name uv -type f 2>/dev/null | sort -V | tail -1); cd $MWS_DIR && \$UV run python tools/control/dds_cmd_publisher.py lo $SCENARIO $EXTRA 2>&1"
 
 echo -e "${G}  ✓${N} Done — stop command sent"
