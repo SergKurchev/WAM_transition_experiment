@@ -46,6 +46,7 @@ if [[ "$STOP" == true ]]; then
     hdr "Stop"
     $SSH "docker compose -f $COMPOSE stop sim-gear-sonic sim-isaac 2>&1 | grep -E 'Stopp|Container' || true"
     ok "Containers stopped"
+    pkill -f "ssh.*${LOCAL_NOVNC_PORT}:localhost:6080" 2>/dev/null && ok "noVNC tunnel closed" || true
     [[ "$1" == "--stop" ]] && exit 0
 fi
 
@@ -134,13 +135,27 @@ else
     warn "Drop signal not sent yet"
 fi
 
-# ── Tunnel info ───────────────────────────────────────────────────────────────
+# ── noVNC tunnel ─────────────────────────────────────────────────────────────
+hdr "noVNC tunnel"
+# Kill any existing tunnel on this port
+pkill -f "ssh.*${LOCAL_NOVNC_PORT}:localhost:6080" 2>/dev/null || true
+sleep 1
+ssh -N -L "${LOCAL_NOVNC_PORT}:localhost:6080" \
+    -p "$SERVER_PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+    -i "$SSH_KEY" "$REMOTE" &
+TUNNEL_PID=$!
+sleep 2
+if kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    ok "noVNC tunnel up (PID $TUNNEL_PID)"
+else
+    warn "Tunnel failed to start — open manually in another terminal:"
+    warn "  ssh -N -L ${LOCAL_NOVNC_PORT}:localhost:6080 x32-techgov-GPU-01"
+fi
+
 echo ""
 echo -e "${G}┌─────────────────────────────────────────────────────────┐${N}"
-echo -e "${G}│  Visual monitoring — run in a NEW terminal:             │${N}"
-echo -e "${G}│                                                         │${N}"
-echo -e "${G}│  ssh -N -L ${LOCAL_NOVNC_PORT}:localhost:6080 x32-techgov-GPU-01   │${N}"
-echo -e "${G}│  Then open:  http://localhost:${LOCAL_NOVNC_PORT}                  │${N}"
+echo -e "${G}│  Simulation is live:                                    │${N}"
+echo -e "${G}│  http://localhost:${LOCAL_NOVNC_PORT}                           │${N}"
 echo -e "${G}│                                                         │${N}"
 echo -e "${G}│  Stop:   bash scripts/sim_start.sh --stop               │${N}"
 echo -e "${G}│  Reset:  bash scripts/sim_start.sh --reset              │${N}"
