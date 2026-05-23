@@ -35,21 +35,27 @@ class UnifoLMModel:
     Generates velocity commands from robot state observations.
     """
 
-    def __init__(self, checkpoint: str | None, test_mode: bool = False):
+    def __init__(self, checkpoint: str | None, test_mode: bool | None = None):
         """
         Initialize UnifoLM model.
 
         Args:
             checkpoint: Path to local checkpoint or HuggingFace Hub ID (e.g., "org/model-name")
-                       If None and test_mode=False, raises error.
+                       If None, automatically uses test_mode=True.
             test_mode: If True, use heuristic arm clapping demo (ignore checkpoint).
+                      If None (default), auto-detect based on checkpoint (True if None, False if set).
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.test_mode = test_mode
         self.model = None
         self.input_dim = 29  # G1 has 29 DOF (q + dq interleaved)
         self.output_dim = 3  # (vx, vy, wz)
         self.step_count = 0
+
+        # Auto-detect test_mode if not explicitly set
+        if test_mode is None:
+            test_mode = (checkpoint is None)
+
+        self.test_mode = test_mode
 
         if test_mode:
             print("[UnifoLM] Running in TEST MODE (arm clapping demo, no model loading)", flush=True)
