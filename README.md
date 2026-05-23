@@ -1,255 +1,309 @@
-# WAM Transition Experiment
+# WAM Transition Experiment — Isaac Sim + GEAR-SONIC + WAM Pipeline
 
-Isaac Sim + GEAR-SONIC + WAM model pipeline for cross-robot skill transfer.
+Fine-tune World Action Models (WAMs) on Unitree G1, test transfer to UBTech Walker Tienkung.
 
-**Robots:** Unitree G1, UBTech Walker Tienkung  
+**Goal:** Train WAM on (G1, Activity 1+2), evaluate zero-shot transfer on (UBTech, Activity 2)  
 **Models:** UnifoLM-WMA-0, EVA  
-**Goal:** fine-tune on (G1, Act1), (G1, Act2), (UBTech, Act1) → evaluate transfer on (UBTech, Act2)
+**Environment:** Isaac Sim 5.1 + GEAR-SONIC WBC + ROS2 DDS
 
 ---
 
-## Architecture
+## 🔴 CRITICAL ARCHITECTURE (Fixed 23 May 2026)
 
 ```
-WAM model (UnifoLM / EVA)
-      │  rt/run_command/cmd  [vx, vy, wz, body_height]
-      ▼
-GEAR-SONIC  ←──── rt/lowstate ────  Isaac Sim
-      │                                  ▲
-      └──────── rt/lowcmd ───────────────┘
-
-Visual output: Xvfb → x11vnc → noVNC → your browser
+Isaac Sim (physics)
+  ├─ rt/lowstate (50D joint state) [10 Hz]
+  │
+sim-ros2-bridge ← THIS IS CRITICAL
+  ├─ Transforms to 994D observation vector
+  │   (joint pos/vel history, IMU, token_state, actions)
+  │
+GEAR-SONIC (WBC policy)
+  ├─ Reads 994D observations
+  ├─ Generates rt/lowcmd (29-DOF joint targets)
+  │
+Isaac Sim (applies joint targets, re-publishes state)
+  │
+  ↑ Loop 10 Hz
+  │
+WAM (your model)
+  ├─ Reads rt/lowstate
+  ├─ Publishes rt/run_command/cmd (velocity goals)
+  │
+GEAR-SONIC
+  └─ Converts velocity → stable 29-DOF motion via WBC
 ```
 
-All communication over CycloneDDS 0.10.2, loopback interface.  
-No DimOS, no LCM, no bridge.
+**Without sim-ros2-bridge:** GEAR-SONIC crashes with `observation dimension (0) ≠ 994`
 
 ---
 
-## Server
+## Prerequisites
 
-| Alias | IP | Port | GPU |
-|-------|----|------|-----|
-| `x32-techgov-GPU-01` | 176.109.83.84 | 2221 | A100 #0 ← **wam-stack lives here** |
-| `x32-techgov-GPU-02` | 176.109.83.84 | 2222 | A100 #1 |
-
----
-
-## Quick Deploy (daily use)
-
-Run from your local machine, from anywhere in the repo:
-
-```bash
-# Sync code + start all containers + show ports
-bash scripts/deploy.sh
-
-# Same, but rebuild WAM Docker image first (after Dockerfile changes)
-bash scripts/deploy.sh --build
-
-# Reset after robot fell
-bash scripts/deploy.sh --reset
-```
-
-Then open a **new terminal** and run the tunnel:
-
-```bash
-ssh -N -L 6181:localhost:6180 x32-techgov-GPU-01
-```
-
-Open browser: **http://localhost:6181**
-
----
-
-## First-time Setup (once per server)
-
-### 1. Clone with submodules
+### On Server (`x32-techgov-GPU-01`)
 
 ```bash
 ssh x32-techgov-GPU-01
 cd /root/skurchev/workspace
 
-git clone --recurse-submodules \
-  https://github.com/SergKurchev/WAM_transition_experiment.git wam-stack
+# 1. Clone mws-dimos (REQUIRED — contains Isaac Sim, GEAR-SONIC, ROS2 bridge, WBC)
+git clone --branch feat/real-transfer \
+  https://github.com/MWS-Physical-AI/mws-dimos.git
+
+# 2. Verify structure
+ls -d mws-dimos wam-stack
+# Should show: mws-dimos  wam-stack
 ```
 
-### 2. Build the WAM Docker image (first time only, ~10 min)
+### Images Already Built on GPU-01
 
+These are pre-built from mws-dimos and will be used directly:
+- `mws-dimos/sim-isaac:unitree-lab-5.1`
+- `mws-sim-gear-sonic-policy:latest`
+- `mws-sim-ros2-bridge:latest`
+
+**First-time setup on another server:**
 ```bash
-bash scripts/deploy.sh --build
-```
-
-This builds CycloneDDS 0.10.x from source (required — no binary wheels exist for
-cyclonedds 0.10.2 + Python 3.10) and installs PyTorch 2.7 + CUDA 12.8.
-
-> **Why 0.10.2?** GEAR-SONIC uses CycloneDDS 0.10.x. Using 11.x in WAM crashes
-> GEAR-SONIC with a segfault in `ddsi_xt_type_init_impl` during DDS discovery.
-
-### 3. Server-only binary files (already in place on GPU-01)
-
-These large files are NOT in git. They live at:
-
-```
-modules/gwbc/gear_sonic_deploy/
-├── policy/release/
-│   ├── model_encoder.onnx        (50 MB)
-│   └── model_decoder.onnx        (40 MB)
-├── planner/target_vel/V2/
-│   └── planner_sonic.onnx
-└── thirdparty/unitree_sdk2/thirdparty/lib/x86_64/
-    ├── libddsc.so / libddsc.so.0
-    └── libddscxx.so / libddscxx.so.0
-```
-
-If they're missing, copy from GPU-02:
-```bash
-# From local machine — copies ONNX files from GPU-02 to GPU-01 via local network
-ssh -A -p 2222 root@176.109.83.84 \
-  "docker save mws-sim-gear-sonic-policy:latest | gzip | \
-   ssh -A -p 2221 root@176.109.83.84 'docker load'"
+cd /root/skurchev/workspace/mws-dimos
+docker compose -f deploy/sim/ros2/compose.yml build  # ~20 min
 ```
 
 ---
 
-## Visual Monitoring (noVNC)
+## Quick Start (Daily Use)
 
-Isaac Sim renders to a virtual display (Xvfb) inside its container.
-noVNC serves it over port 6180 on the server.
-
-### Open the tunnel (local machine, new terminal)
+### Terminal 1: Start Stack
 
 ```bash
-ssh -N -L 6181:localhost:6180 x32-techgov-GPU-01
+ssh x32-techgov-GPU-01
+cd /root/skurchev/workspace/wam-stack
+docker compose up -d
 ```
 
-Keep this terminal open. Then open: **http://localhost:6181**
-
-> Port 6180 is often busy on Windows. Use 6181 locally (maps to 6180 on server).
-
-### Verify the tunnel works
-
+**Verify all 4 containers are healthy:**
 ```bash
-curl -s http://localhost:6181 | head -3
-# Expected: <!DOCTYPE html> ...
-```
-
-### Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `bind: Permission denied` | Local port 6180 is busy | Use 6181: `ssh -N -L 6181:localhost:6180 ...` |
-| `channel: open failed: connect failed` | Stack not running | Run `bash scripts/deploy.sh` first |
-| noVNC loads, black screen | Isaac Sim still warming up | Wait 2–5 min |
-| Robot is lying down | GEAR-SONIC lost connection briefly | Run `bash scripts/deploy.sh --reset` |
-
----
-
-## Updating WAM Code (hot-reload)
-
-`src/` is bind-mounted into the container — changes are live after a restart.
-
-```bash
-# Edit src/*.py locally, then:
-bash scripts/deploy.sh          # syncs and restarts everything
-
-# Or if only WAM changed and stack is already up:
-scp -P 2221 src/main.py root@176.109.83.84:/root/skurchev/workspace/wam-stack/src/
-ssh -p 2221 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose restart wam"
-```
-
-### Switching models
-
-```bash
-# Set env in compose.yml or pass on restart:
-ssh -p 2221 root@176.109.83.84 "
-  cd /root/skurchev/workspace/wam-stack
-  WAM_MODEL=unifolm WAM_CHECKPOINT=/path/to/ckpt docker compose restart wam
-"
-```
-
----
-
-## Monitoring
-
-```bash
-# All containers
-ssh -p 2221 root@176.109.83.84 "cd /root/skurchev/workspace/wam-stack && docker compose logs -f"
-
-# Individual
-docker compose logs -f wam
-docker compose logs -f isaac-sim
-docker compose logs -f gear-sonic
-
-# Health
 docker compose ps
+# Expected:
+# wam-isaac-sim      running (healthy)
+# wam-gear-sonic     running (healthy)  [after ~30s]
+# wam-ros2-bridge    running (healthy)  [after ~15s]
+# wam-inference      running
 ```
 
-Expected healthy state:
-```
-NAME               STATUS
-wam-gear-sonic     running (healthy)
-wam-isaac-sim      running (healthy)
-wam-inference      running
-```
+### Terminal 2: noVNC Tunnel (Local Machine)
 
----
-
-## Project Structure
-
-```
-wam-stack/
-├── compose.yml                  # 3 services: isaac-sim, gear-sonic, wam
-├── docker/
-│   ├── isaac-sim/
-│   │   ├── Dockerfile           # Isaac Sim 5.1 + Isaac Lab 2.3.2 + noVNC
-│   │   └── entrypoint.sh        # Xvfb + x11vnc + websockify → port 6180
-│   ├── gear-sonic/
-│   │   ├── Dockerfile           # FROM mws-sim-gear-sonic-policy:latest
-│   │   └── entrypoint.sh        # fixes x86_64 DDS lib path, enables lo multicast
-│   └── wam/
-│       └── Dockerfile           # CUDA 12.2 + Python 3.10 + torch + cyclonedds==0.10.2
-├── scripts/
-│   ├── deploy.sh                # ← MAIN SCRIPT: sync + start + show ports
-│   ├── start.sh                 # server-side launch (used by deploy.sh)
-│   ├── stop.sh                  # docker compose down
-│   ├── sync.sh                  # rsync only (no start)
-│   └── view.sh                  # SSH tunnel helper
-├── modules/gwbc/                # submodule: GR00T-Kimodo (GEAR-SONIC + robot model data)
-└── src/                         # WAM code (bind-mounted, hot-reload)
-    ├── main.py                  # control loop: state → model → DDS command (10 Hz)
-    ├── dds_interface.py         # rt/lowstate subscriber + rt/run_command/cmd publisher
-    └── models/
-        ├── unifolm.py           # UnifoLM-WMA-0 adapter (stub — TODO)
-        └── eva.py               # EVA adapter (stub — TODO)
-```
-
----
-
-## Port Assignments
-
-| Port | Protocol | Direction | Purpose | Owner |
-|------|----------|-----------|---------|-------|
-| **5991** | VNC (RFB) | server → client | x11vnc virtual display | wam-isaac-sim |
-| **6180** | HTTP/WS | server → browser | noVNC web viewer | wam-isaac-sim |
-| **6559** | ZMQ PULL | local | Isaac reset-sim signal (`scripts/reset_sim.sh`) | wam-isaac-sim |
-| **5556** | ZMQ PUB | GEAR-SONIC → ops | manual control commands (debug only) | wam-gear-sonic |
-
-**noVNC tunnel (run locally):**
 ```bash
-ssh -N -L 6181:localhost:6180 x32-techgov-GPU-01
-# then open: http://localhost:6181
+ssh -N -L 6081:localhost:6080 -p 2221 x32-techgov-GPU-01
 ```
 
-**Ports NOT used by wam-stack:** 5558, 5559, 5900, 5901, 6080, 6081.
+**Open browser:** `http://localhost:6081`
+
+You should see:
+1. Robot balancing/moving in Isaac Sim (after 30–60s warmup)
+2. GEAR-SONIC generating smooth motion from velocity goals
+3. WAM agent publishing commands
 
 ---
 
-## DDS Interface Reference
+## Directory Structure & Dependencies
 
-| Topic | Direction | Type | Rate | Content |
-|-------|-----------|------|------|---------|
-| `rt/lowstate` | Isaac Sim → WAM | `unitree_hg.msg.dds_.LowState_` | 50 Hz | 29-DOF joint pos/vel/torque + IMU |
-| `rt/lowcmd` | GEAR-SONIC → Isaac Sim | `unitree_hg.msg.dds_.LowCmd_` | 50 Hz | 29-DOF joint targets |
-| `rt/run_command/cmd` | WAM → GEAR-SONIC | `std_msgs.msg.dds_.String_` | 10 Hz | JSON `[vx, vy, wz, body_height]` |
+```
+/root/skurchev/workspace/
+├── mws-dimos/                    ← EXTERNAL (do NOT modify)
+│   ├── deploy/sim/ros2/
+│   │   ├── compose.yml           ← Reference (we don't use this directly)
+│   │   ├── config.toml           ← DDS bridge config (referenced by our compose)
+│   │   └── entrypoints/
+│   │       └── launch_g1.sh      ← Isaac Sim entrypoint
+│   ├── modules/gwbc/
+│   │   ├── gear_sonic_deploy/    ← ONNX models + WBC config
+│   │   └── ...
+│   └── docker/
+│       └── images/
+│           ├── ros2-bridge/Dockerfile
+│           └── ...
+│
+└── wam-stack/                    ← YOUR REPO (this one)
+    ├── compose.yml               ← MAIN: uses mws-dimos images + builds wam-inference
+    ├── docker/
+    │   └── wam/Dockerfile        ← Only image built from wam-stack
+    ├── src/
+    │   ├── main.py               ← WAM control loop (10 Hz)
+    │   ├── dds_interface.py      ← DDS subscriber/publisher
+    │   └── models/
+    │       ├── unifolm.py        ← TODO: implement
+    │       └── eva.py            ← TODO: implement
+    └── scripts/
+        ├── deploy.sh             ← Deploy to server (local machine)
+        ├── sync.sh               ← Rsync to server
+        └── ...
+```
 
-WAM reads `rt/lowstate`, runs inference, publishes `rt/run_command/cmd`.  
-GEAR-SONIC converts velocity commands into stable 29-DOF joint targets.
+### Key File Roles
+
+| File | From | Purpose |
+|------|------|---------|
+| `deploy/sim/ros2/config.toml` | mws-dimos | DDS bridge config (defines observation streams) |
+| `modules/gwbc/gear_sonic_deploy/` | mws-dimos | GEAR-SONIC ONNX models + motion library |
+| `src/main.py` | wam-stack | Your WAM agent (reads lowstate, publishes commands) |
+| `docker/wam/Dockerfile` | wam-stack | WAM container (Python 3.10 + torch + cyclonedds 0.10.2) |
+
+---
+
+## Troubleshooting
+
+### "observation dimension (0) ≠ 994" (GEAR-SONIC crash)
+
+**Cause:** ros2-bridge not running or config.toml path wrong
+
+**Fix:**
+```bash
+docker compose ps | grep ros2-bridge
+# Should see: wam-ros2-bridge running (healthy)
+
+docker logs wam-ros2-bridge | tail -20
+# Should see: "bridge ready" or observation stream subscriptions
+```
+
+If ros2-bridge is not running:
+```bash
+docker compose up -d ros2-bridge
+docker logs wam-ros2-bridge
+```
+
+### "Cannot connect to http://localhost:6081"
+
+**Cause:** SSH tunnel died or not started
+
+**Fix:**
+```bash
+# Local machine — kill old tunnel
+killall ssh 2>/dev/null
+
+# Restart tunnel
+ssh -N -L 6081:localhost:6080 -p 2221 x32-techgov-GPU-01
+```
+
+### Robot lying down / not moving
+
+**Cause:** GEAR-SONIC initializing (normal for 30–60s after startup)
+
+**Check:**
+```bash
+docker logs wam-gear-sonic | grep -E "Running|ready"
+```
+
+**If stuck:**
+```bash
+docker compose restart wam-gear-sonic
+```
+
+### Isaac Sim crashes / container exits
+
+**Cause:** Usually DISPLAY or shader compilation issue
+
+**Check:**
+```bash
+docker logs wam-isaac-sim | tail -50
+```
+
+**Fix:**
+```bash
+docker compose down
+docker compose up -d wam-isaac-sim
+docker logs -f wam-isaac-sim  # wait 2–5 min
+```
+
+---
+
+## Running the Stack
+
+### Full Restart
+```bash
+cd /root/skurchev/workspace/wam-stack
+docker compose down
+docker compose up -d
+```
+
+### Restart One Service
+```bash
+docker compose restart wam  # just WAM agent
+docker compose restart wam-gear-sonic
+# etc.
+```
+
+### View Logs
+```bash
+docker compose logs -f wam              # WAM agent (10 Hz loop)
+docker compose logs -f wam-gear-sonic   # GEAR-SONIC inference + errors
+docker compose logs -f wam-isaac-sim    # Isaac Sim physics + rendering
+docker compose logs -f wam-ros2-bridge  # DDS bridge (observation transforms)
+```
+
+---
+
+## Modifying WAM Code
+
+### Hot-reload (src/ is bind-mounted)
+
+```bash
+# Edit locally
+vim src/main.py
+
+# On server
+cd /root/skurchev/workspace/wam-stack
+docker compose restart wam
+
+# Verify changes
+docker logs -f wam
+```
+
+### Switching Models
+
+```bash
+WAM_MODEL=unifolm docker compose restart wam
+# OR
+WAM_MODEL=eva WAM_CHECKPOINT=/path/to/ckpt docker compose restart wam
+```
+
+### Installing Dependencies
+
+If you add packages to `src/`:
+```bash
+# On server, update WAM container
+cd /root/skurchev/workspace/wam-stack
+docker compose up -d --build wam
+```
+
+---
+
+## DDS Topics Reference
+
+| Topic | Publisher | Subscriber | Rate | Format |
+|-------|-----------|------------|------|--------|
+| `rt/lowstate` | Isaac Sim | GEAR-SONIC, WAM | 10 Hz | 29-DOF state (joint pos/vel/torque + IMU) |
+| `rt/run_command/cmd` | WAM | GEAR-SONIC | 10 Hz | JSON `[vx, vy, wz, body_height]` |
+| `rt/lowcmd` | GEAR-SONIC | Isaac Sim | 10 Hz | 29-DOF joint targets |
+
+DDS domain ID: `42` (configured in compose.yml)  
+DDS interface: `localhost` (loopback, no external network)
+
+---
+
+## Project Status
+
+- ✅ Isaac Sim + GEAR-SONIC + ROS2 bridge working (verified 23 May)
+- ✅ DDS communication (rt/lowstate, rt/run_command/cmd, rt/lowcmd)
+- ⏳ UnifoLM-WMA-0 model integration (TODO)
+- ⏳ EVA model integration (TODO)
+- ⏳ Dataset collection (~400 samples per activity)
+- ⏳ Fine-tuning on G1
+- ⏳ Transfer evaluation on UBTech
+
+---
+
+## Support / Questions
+
+See `CLAUDE.md` for architecture deep-dive and `QUICKSTART.md` for 5-minute getting started.
+
+For setup issues on a new server, refer to [SETUP.md](SETUP.md).

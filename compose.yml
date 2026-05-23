@@ -1,34 +1,59 @@
-# WAM inference stack — fully self-contained, no dependency on mws-dimos.
+# wam-stack: WAM agent + mws-dimos infrastructure (Isaac Sim, GEAR-SONIC, ROS2 Bridge)
 #
-# Usage (from wam-stack/):
-#   scripts/start.sh                                   # start all
-#   scripts/start.sh --scene /path/to/scene.usd        # with scene
-#   scripts/start.sh --build                           # rebuild wam image then start
+# Requires: mws-dimos cloned to /root/skurchev/workspace/mws-dimos (feat/real-transfer branch)
 #
-# Visual monitoring: noVNC on port 6180 (virtual display inside isaac-sim container).
-# SSH tunnel: ssh -L 6180:localhost:6180 x32-techgov-GPU-01
-# Then open:  http://localhost:6180
+# Start:
+#   docker compose up -d
 #
-# Hot-reload WAM code:  edit src/ → sync → docker compose restart wam
+# Visual (local machine):
+#   ssh -N -L 6081:localhost:6080 -p 2221 x32-techgov-GPU-01
+#   http://localhost:6081
 
 services:
 
-  # --------------------------------------------------------------------------
-  # GEAR-SONIC whole-body control policy (C++ TensorRT binary).
-  # Subscribes: rt/lowstate  |  Publishes: rt/lowcmd
-  # Source: modules/gwbc/ (GR00T-Kimodo submodule)
-  # --------------------------------------------------------------------------
-  gear-sonic:
-    build:
-      context: .
-      dockerfile: docker/gear-sonic/Dockerfile
-      args:
-        TENSORRT_IMAGE: ${TENSORRT_IMAGE:-nvcr.io/nvidia/tensorrt:24.12-py3}
-    image: wam-gear-sonic:latest
+  # Isaac Sim — physics simulator + rt/lowstate publisher (pre-built image from mws-dimos)
+  sim-isaac:
+    image: mws-dimos/sim-isaac:unitree-lab-5.1
+    container_name: wam-isaac-sim
+    entrypoint: ["/entrypoint.sh"]
+    command: ["/bin/bash", "/workspace/mws-dimos/deploy/sim/ros2/entrypoints/launch_g1.sh"]
+    network_mode: host
+    volumes:
+      - /root/skurchev/workspace/mws-dimos/deploy/images/isaac-sim/entrypoint.sh:/entrypoint.sh:ro
+      - /root/skurchev/workspace/mws-dimos:/workspace/mws-dimos:rw
+      - /root/skurchev/workspace/mws-dimos/modules/gwbc:/workspace/gwbc:ro
+      - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - /root/skurchev/workspace/mws-dimos/modules/gwbc/decoupled_wbc/control/robot_model/model_data/g1:/workspace/assets:ro
+      - /root/skurchev/workspace/mws-dimos/assets/robots/g1:/workspace/robot_assets:ro
+      - sim_bridge_shm:/run/mws
+    environment:
+      - ACCEPT_EULA=Y
+      - OMNI_KIT_ACCEPT_EULA=YES
+      - PRIVACY_CONSENT=Y
+      - DISPLAY=:99
+      - G1_TRAINING_ASSET_DIR=/workspace/assets
+      - SCENE_FILE=${SCENE_FILE:-}
+      - ROBOT_USD_FILE=${ROBOT_USD_FILE:-g1_29dof.usd}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    runtime: nvidia
+    shm_size: '8gb'
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/isaac_ready"]
+      interval: 2s
+      timeout: 1s
+      retries: 60
+      start_period: 120s
+
+  # GEAR-SONIC — whole-body control policy (pre-built image from mws-dimos)
+  sim-gear-sonic:
+    image: mws-sim-gear-sonic-policy:latest
     container_name: wam-gear-sonic
     network_mode: host
     volumes:
-      - ./modules/gwbc/gear_sonic_deploy:/opt/gear_sonic_deploy:rw
+      - /root/skurchev/workspace/mws-dimos/modules/gwbc/gear_sonic_deploy:/opt/gear_sonic_deploy:rw
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
@@ -60,93 +85,37 @@ services:
       timeout: 2s
       retries: 12
       start_period: 180s
+    depends_on:
+      sim-isaac:
+        condition: service_healthy
 
-  # --------------------------------------------------------------------------
-  # Isaac Sim — bare InteractiveScene + SimulationContext loop.
-  # Publishes: rt/lowstate  |  Subscribes: rt/lowcmd
-  # Visual monitoring via noVNC on port 6180 (Xvfb + x11vnc + websockify).
-  # SSH tunnel: ssh -L 6180:localhost:6180 x32-techgov-GPU-01
-  # --------------------------------------------------------------------------
-  isaac-sim:
-    build:
-      context: .
-      dockerfile: docker/isaac-sim/Dockerfile
-      args:
-        BASE_IMAGE: ${ISAAC_SIM_BASE_IMAGE:-mws-dimos/isaac-sim-base:unitree-lab-5.1}
-    image: wam-isaac-sim:latest
-    container_name: wam-isaac-sim
-    entrypoint: ["/entrypoint.sh"]
-    command: ["/bin/bash", "/workspace/wam-stack/scripts/isaac/launch_g1.sh"]
-    network_mode: host
-    volumes:
-      - ./docker/isaac-sim/entrypoint.sh:/entrypoint.sh:ro
-      - ./:/workspace/wam-stack:rw
-      - ./modules/gwbc:/workspace/gwbc:ro
-      - ./modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
-      - ./modules/gwbc/decoupled_wbc/control/robot_model/model_data/g1:/workspace/assets:ro
-      - ${SCENE_DIR:-/tmp}:/workspace/scene_assets:ro
-      - ${ROBOT_USD_DIR:-./assets/robots/g1}:/workspace/robot_assets:ro
-    environment:
-      - ACCEPT_EULA=${ACCEPT_EULA:-Y}
-      - OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-YES}
-      - PRIVACY_CONSENT=${PRIVACY_CONSENT:-Y}
-      - DISPLAY=:99
-      - G1_TRAINING_ASSET_DIR=/workspace/assets
-      - SCENE_FILE=${SCENE_FILE:-}
-      - ROBOT_USD_FILE=${ROBOT_USD_FILE:-g1_29dof.usd}
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
-    runtime: nvidia
-    shm_size: '8gb'
-    stdin_open: true
-    tty: true
-    healthcheck:
-      test: ["CMD", "test", "-f", "/tmp/isaac_ready"]
-      interval: 2s
-      timeout: 1s
-      retries: 60
-      start_period: 120s
-
-  # --------------------------------------------------------------------------
-  # ROS2/DDS bridge — synchronizes Isaac Sim state with GEAR-SONIC input.
-  # This is CRITICAL: without it, GEAR-SONIC doesn't receive observations from Isaac Sim.
-  # Subscribes: rt/lowstate (from Isaac Sim)
-  # Publishes: robot observation streams for GEAR-SONIC
-  # --------------------------------------------------------------------------
-  ros2-bridge:
-    build:
-      context: ../mws-dimos
-      dockerfile: deploy/images/ros2-bridge/Dockerfile
-    image: wam-ros2-bridge:latest
+  # ROS2 Bridge — transforms isaac rt/lowstate → 994D observations for GEAR-SONIC
+  sim-ros2-bridge:
+    image: mws-sim-ros2-bridge:latest
     container_name: wam-ros2-bridge
     network_mode: host
     privileged: true
     volumes:
-      - ros2_bridge_shm:/run/mws
-      - ${ROS2_BRIDGE_CONFIG:-../mws-dimos/deploy/sim/ros2/config.toml}:/workspace/mws-dimos/deploy/sim/ros2/config.toml:ro
+      - sim_bridge_shm:/run/mws
+      - /root/skurchev/workspace/mws-dimos/deploy/sim/ros2/config.toml:/workspace/mws-dimos/deploy/sim/ros2/config.toml:ro
     environment:
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
-      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
-      - FASTDDS_BUILTIN_TRANSPORTS=${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}
-      - DIMOS_SIM_CONFIG_FILE=${DIMOS_SIM_CONFIG_FILE:-/workspace/mws-dimos/deploy/sim/ros2/config.toml}
+      - ROS_DOMAIN_ID=42
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+      - DIMOS_SIM_CONFIG_FILE=/workspace/mws-dimos/deploy/sim/ros2/config.toml
     healthcheck:
-      test: ["CMD", "test", "-f", "${ROS2_BRIDGE_READY_FILE:-/tmp/mws_sim_ros2_bridge_ready}"]
+      test: ["CMD", "test", "-f", "/tmp/mws_sim_ros2_bridge_ready"]
       interval: 2s
       timeout: 1s
       retries: 10
       start_period: 10s
     depends_on:
-      isaac-sim:
+      sim-isaac:
         condition: service_healthy
-      gear-sonic:
+      sim-gear-sonic:
         condition: service_healthy
 
-  # --------------------------------------------------------------------------
-  # WAM inference — your model (UnifoLM-WMA-0 or EVA).
-  # Reads rt/lowstate from Isaac Sim via DDS.
-  # Publishes rt/run_command/cmd → GEAR-SONIC drives the robot.
-  # src/ is bind-mounted: edit locally → docker compose restart wam.
-  # --------------------------------------------------------------------------
+  # WAM — World Action Model inference agent (built from wam-stack)
   wam:
     build:
       context: .
@@ -155,8 +124,8 @@ services:
     container_name: wam-inference
     network_mode: host
     volumes:
-      - ./src:/workspace/wam:rw
-      - ./modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - /root/skurchev/workspace/wam-stack/src:/workspace/wam:rw
+      - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
@@ -164,20 +133,20 @@ services:
       - PYTHONUNBUFFERED=1
       - WAM_MODEL=${WAM_MODEL:-stub}
       - WAM_CHECKPOINT=${WAM_CHECKPOINT:-}
-      - DDS_IFACE=${DDS_IFACE:-lo}
+      - DDS_IFACE=lo
     runtime: nvidia
     shm_size: '4gb'
     stdin_open: true
     tty: true
     command: ["python", "/workspace/wam/main.py"]
     depends_on:
-      isaac-sim:
+      sim-isaac:
         condition: service_healthy
-      ros2-bridge:
+      sim-ros2-bridge:
         condition: service_healthy
 
 volumes:
-  ros2_bridge_shm:
+  sim_bridge_shm:
     driver: local
     driver_opts:
       type: tmpfs
