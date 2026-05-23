@@ -70,18 +70,18 @@ class UnifoLMModel:
         """Load model from checkpoint (local file or HuggingFace Hub)."""
         checkpoint = checkpoint.strip()
 
-        # Try HuggingFace Hub first (format: "org/model-name")
-        if "/" in checkpoint and not os.path.isfile(checkpoint):
-            self._load_from_hf_hub(checkpoint)
-        # Try local file
-        elif os.path.isfile(checkpoint):
+        # Try local file first (has .pt extension or file exists)
+        if os.path.isfile(checkpoint):
             self._load_from_local(checkpoint)
+        # Try HuggingFace Hub (format: "org/model-name", no / in actual path)
+        elif "/" in checkpoint and not checkpoint.endswith(".pt"):
+            self._load_from_hf_hub(checkpoint)
         else:
             raise FileNotFoundError(
                 f"Checkpoint not found: {checkpoint!r}\n"
                 f"Expected either:\n"
-                f"  - HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0')\n"
-                f"  - Local file path (e.g., '/path/to/model.pt')"
+                f"  - Local file path (e.g., '/path/to/model.pt')\n"
+                f"  - HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0')"
             )
 
     def _load_from_hf_hub(self, hf_hub_id: str) -> None:

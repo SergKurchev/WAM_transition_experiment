@@ -95,9 +95,9 @@ if [[ "$@" == *"--reset"* ]]; then
     log_warn "Using --reset flag (will stop and restart services)"
 fi
 
-# SSH to server and run deploy.sh
+# SSH to server and run deploy.sh with environment variables
 ssh -p "$SERVER_PORT" -i "$LOCAL_KEY" "$SERVER_USER@$SERVER_IP" \
-    "cd $SERVER_PATH && WAM_MODEL=unifolm bash scripts/deploy.sh $DEPLOY_FLAGS"
+    "cd $SERVER_PATH && export WAM_MODEL=unifolm && export WAM_CHECKPOINT='${WAM_CHECKPOINT}' && bash scripts/deploy.sh $DEPLOY_FLAGS"
 
 # ============================================================================
 # Step 3: Show next steps
