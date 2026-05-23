@@ -82,7 +82,7 @@ def test_unifolm_inference():
             t0 = time.time()
 
             # Run inference
-            vx, vy, wz = model(mock_state)
+            vx, vy, wz, body_height = model(mock_state)
 
             elapsed = time.time() - t0
             timings.append(elapsed)
@@ -91,6 +91,7 @@ def test_unifolm_inference():
             assert isinstance(vx, float), f"vx must be float, got {type(vx)}"
             assert isinstance(vy, float), f"vy must be float, got {type(vy)}"
             assert isinstance(wz, float), f"wz must be float, got {type(wz)}"
+            assert isinstance(body_height, float), f"body_height must be float, got {type(body_height)}"
             assert -1.0 <= vx <= 1.0, f"vx out of range: {vx}"
             assert -1.0 <= vy <= 1.0, f"vy out of range: {vy}"
             assert -2.0 <= wz <= 2.0, f"wz out of range: {wz}"
@@ -100,7 +101,7 @@ def test_unifolm_inference():
                 elapsed_sec = step / control_hz
                 print(
                     f"  T={elapsed_sec:5.1f}s  Step {step:3d}/{num_steps}  "
-                    f"cmd=[vx={vx:+.1f} vy={vy:+.1f} wz={wz:+.1f}]  "
+                    f"cmd=[vx={vx:+.1f} vy={vy:+.1f} wz={wz:+.1f} h={body_height:+.2f}]  "
                     f"inference_ms={elapsed*1000:.1f}"
                 )
 

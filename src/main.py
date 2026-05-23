@@ -34,7 +34,7 @@ def load_model(name: str, checkpoint: str | None):
 
 def _stub_model(state):
     """Placeholder: walk slowly forward. Replace with real model."""
-    return 0.15, 0.0, 0.0   # vx, vy, wz
+    return 0.15, 0.0, 0.0, 0.0   # vx, vy, wz, body_height
 
 
 # ── main loop ─────────────────────────────────────────────────────────────────
@@ -75,8 +75,8 @@ def main():
         t0 = time.time()
 
         state = dds.get_state()
-        vx, vy, wz = model(state)
-        dds.send_command(vx, vy, wz, body_height=0.0)
+        vx, vy, wz, body_height = model(state)
+        dds.send_command(vx, vy, wz, body_height=body_height)
         last_cmd = (vx, vy, wz)
         loop_count += 1
 

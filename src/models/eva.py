@@ -14,6 +14,6 @@ class EVAModel:
         # TODO: load model from checkpoint
         raise NotImplementedError("EVA integration not yet implemented")
 
-    def __call__(self, state: RobotState) -> tuple[float, float, float]:
-        """Run inference. Returns (vx, vy, wz)."""
+    def __call__(self, state: RobotState) -> tuple[float, float, float, float]:
+        """Run inference. Returns (vx, vy, wz, body_height)."""
         raise NotImplementedError

@@ -134,15 +134,15 @@ class UnifoLMModel:
             nn.Linear(64, self.output_dim),
         )
 
-    def __call__(self, state: RobotState) -> tuple[float, float, float]:
+    def __call__(self, state: RobotState) -> tuple[float, float, float, float]:
         """
-        Run inference to generate velocity commands.
+        Run inference to generate velocity and height commands.
 
         Args:
             state: RobotState (q, dq, tau with 29-DOF measurements)
 
         Returns:
-            (vx, vy, wz) velocity commands for GEAR-SONIC
+            (vx, vy, wz, body_height) commands for GEAR-SONIC
         """
         if self.test_mode:
             return self._arm_clapping_demo(state)
@@ -167,10 +167,10 @@ class UnifoLMModel:
             vy = float(np.clip(vy, -1.0, 1.0))
             wz = float(np.clip(wz, -np.pi, np.pi))
 
-            return vx, vy, wz
+            return vx, vy, wz, 0.0
         except Exception as e:
             print(f"[UnifoLM] Inference error: {e}", flush=True)
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
 
     def _arm_clapping_demo(self, state: RobotState) -> tuple[float, float, float]:
         """
@@ -216,6 +216,11 @@ class UnifoLMModel:
         vy = 0.0  # No left/right motion
         wz = 0.0  # No rotation
 
+        # Use body_height to signal arm motion to GEAR-SONIC
+        # When clapping (effort > 0), increase body_height to trigger arm movement
+        # This is a proxy signal: GEAR-SONIC will adjust arm targets based on body_height
+        body_height = arm_effort * 0.15  # Scale to reasonable height range
+
         # Log every clap cycle (every 40 steps)
         if cycle_pos == 0 and self.step_count > 1:
             cycle_number = self.step_count // cycle_length
@@ -239,11 +244,11 @@ class UnifoLMModel:
             print(
                 f"[UnifoLM CLAP] cycle={cycle_number}  progress={cycle_progress:5.1f}%  "
                 f"state={arm_state:8s}  effort={arm_effort:+.2f}  "
-                f"body=[vx={vx:.1f} vy={vy:.1f} wz={wz:.1f}]",
+                f"body=[vx={vx:.1f} vy={vy:.1f} wz={wz:.1f} h={body_height:+.2f}]",
                 flush=True,
             )
 
-        return vx, vy, wz
+        return vx, vy, wz, body_height
 
 
 # ─────────────────────────────────────────────────────────────────────────────
