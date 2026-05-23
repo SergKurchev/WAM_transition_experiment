@@ -6,6 +6,8 @@ Fine-tune World Action Models (WAMs) on Unitree G1, test transfer to UBTech Walk
 **Models:** UnifoLM-WMA-0, EVA  
 **Environment:** Isaac Sim 5.1 + GEAR-SONIC WBC + ROS2 DDS
 
+**Current Status:** Stable commit: `5615141` (main branch) — Full stack verified working (23 May 2026)
+
 ---
 
 ## 🚀 Quick Start (5 minutes)
