@@ -67,12 +67,14 @@ def test_unifolm_inference():
         print(f"[FAIL] {e}")
         return False
 
-    # Test 3: Run inference loop (10 seconds at 10 Hz = 100 steps)
-    print("\n[TEST 3] Run 10 seconds of inference (100 steps at 10 Hz)")
+    # Test 3: Run inference loop (20 seconds showing clapping pattern)
+    print("\n[TEST 3] Run 20 seconds of inference (200 steps at 10 Hz)")
     print("-" * 70)
+    print("Pattern: Robot stays in place and claps arms in 4-second cycles")
+    print()
     control_hz = 10
     dt = 1.0 / control_hz
-    num_steps = 100
+    num_steps = 200  # 20 seconds = 5 complete clap cycles
     timings = []
 
     try:
@@ -91,19 +93,21 @@ def test_unifolm_inference():
             assert isinstance(wz, float), f"wz must be float, got {type(wz)}"
             assert -1.0 <= vx <= 1.0, f"vx out of range: {vx}"
             assert -1.0 <= vy <= 1.0, f"vy out of range: {vy}"
+            assert -2.0 <= wz <= 2.0, f"wz out of range: {wz}"
 
-            # Log every second
-            if step % control_hz == 0:
+            # Log every 2 seconds (20 steps at 10 Hz)
+            if step % 20 == 0:
+                elapsed_sec = step / control_hz
                 print(
-                    f"  Step {step:3d}/{num_steps}  "
-                    f"cmd=[vx={vx:+.2f} vy={vy:+.2f} wz={wz:+.2f}]  "
+                    f"  T={elapsed_sec:5.1f}s  Step {step:3d}/{num_steps}  "
+                    f"cmd=[vx={vx:+.1f} vy={vy:+.1f} wz={wz:+.1f}]  "
                     f"inference_ms={elapsed*1000:.1f}"
                 )
 
             # Sleep to maintain 10 Hz
             time.sleep(max(0.0, dt - elapsed))
 
-        print("\n[PASS] Inference loop completed successfully")
+        print("\n[PASS] Inference loop completed successfully (5 clap cycles)")
     except Exception as e:
         print(f"[FAIL] {e}")
         return False

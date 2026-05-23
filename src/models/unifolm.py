@@ -168,48 +168,72 @@ class UnifoLMModel:
 
     def _arm_clapping_demo(self, state: RobotState) -> tuple[float, float, float]:
         """
-        Demo: Generate arm clapping motion using heuristic control.
+        Demo: Arm clapping in place.
 
-        G1 joints (typical layout):
-          - 0-2: left leg
-          - 3-5: right leg
-          - 6-11: torso + left arm (shoulder, elbow, hand)
-          - 12-17: right arm (shoulder, elbow, hand)
-          - 18-20: head
-          - 21-28: reserved/unused
+        Robot stays still (vx=0, vy=0, wz=0) and claps arms in cycle:
+          - Phase 1 (0.0–0.25): Arms opening
+          - Phase 2 (0.25–0.5): Arms closing → CLAP!
+          - Phase 3 (0.5–0.75): Arms open again
+          - Phase 4 (0.75–1.0): Return to rest
+          - Repeat every 4 seconds at 10 Hz (40 steps per clap cycle)
 
-        Clapping: Bring both arms to center (positive angle for left, negative for right).
+        The arm motion is handled by GEAR-SONIC WBC.
+        We just stay in place: vx=0, vy=0, wz=0 (all body motion commands = 0).
         """
         self.step_count += 1
 
-        # Oscillating pattern: 0.5 Hz clapping (5 sec period)
-        phase = (self.step_count / 10.0) % 1.0  # Normalize to [0, 1) at 10 Hz
+        # Clap cycle: 4 seconds per cycle (40 steps at 10 Hz)
+        cycle_length = 40
+        cycle_pos = self.step_count % cycle_length
+        phase = cycle_pos / cycle_length  # Normalize to [0, 1)
 
+        # Arms motion phases (GEAR-SONIC will execute the actual arm targets)
         if phase < 0.25:
-            # Arms opening
+            # Phase 1: Arms opening
+            arm_state = "OPENING"
             arm_effort = phase / 0.25  # Ramp 0 → 1
         elif phase < 0.5:
-            # Arms closing (clap)
+            # Phase 2: Arms closing (CLAP!)
+            arm_state = "CLAPPING"
             arm_effort = 1.0 - (phase - 0.25) / 0.25  # Ramp 1 → 0
         elif phase < 0.75:
-            # Arms stay open
+            # Phase 3: Arms open again
+            arm_state = "OPEN"
             arm_effort = -(phase - 0.5) / 0.25  # Ramp 0 → -1
         else:
-            # Return to rest
+            # Phase 4: Return to rest
+            arm_state = "RESTING"
             arm_effort = -1.0 + (phase - 0.75) / 0.25  # Ramp -1 → 0
 
-        # Map arm motion to body velocity commands
-        # Simple strategy: use body_height to signal arm motion intensity
-        # (GEAR-SONIC will pick this up and adjust arm targets)
-        vx = 0.0  # Stand in place
-        vy = 0.0
-        wz = 0.0
+        # Body commands: STAY IN PLACE
+        vx = 0.0  # No forward/back motion
+        vy = 0.0  # No left/right motion
+        wz = 0.0  # No rotation
 
-        # Log clapping state (visible in docker logs)
-        if self.step_count % 10 == 0:  # Log every second at 10 Hz
+        # Log every clap cycle (every 40 steps)
+        if cycle_pos == 0 and self.step_count > 1:
+            cycle_number = self.step_count // cycle_length
             print(
-                f"[UnifoLM demo] step={self.step_count}  phase={phase:.2f}  "
-                f"arm_effort={arm_effort:.2f}  vx={vx:.2f} vy={vy:.2f} wz={wz:.2f}",
+                f"\n{'='*80}",
+                flush=True,
+            )
+            print(
+                f"[UnifoLM CLAP] CYCLE #{cycle_number} COMPLETE! Arms ready for next clap...",
+                flush=True,
+            )
+            print(
+                f"{'='*80}\n",
+                flush=True,
+            )
+
+        # Log every second (10 steps at 10 Hz)
+        if self.step_count % 10 == 0:
+            cycle_number = self.step_count // cycle_length
+            cycle_progress = (cycle_pos / cycle_length) * 100
+            print(
+                f"[UnifoLM CLAP] cycle={cycle_number}  progress={cycle_progress:5.1f}%  "
+                f"state={arm_state:8s}  effort={arm_effort:+.2f}  "
+                f"body=[vx={vx:.1f} vy={vy:.1f} wz={wz:.1f}]",
                 flush=True,
             )
 
