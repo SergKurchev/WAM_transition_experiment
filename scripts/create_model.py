@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create a simple UnifoLM-WMA-0 model for arm clapping demo.
+Create a simple UnifoLM-WMA-0 model for arm extending demo.
 
 This script:
 1. Creates a simple MLP model (PyTorch)
@@ -10,7 +10,7 @@ This script:
 
 The model learns to:
 - Keep robot in place (vx=vy=wz=0)
-- Generate periodic arm clapping (body_height oscillates)
+- Generate periodic arm extension forward (body_height oscillates)
 """
 
 import sys

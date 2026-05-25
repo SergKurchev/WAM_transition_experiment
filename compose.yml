@@ -126,6 +126,7 @@ services:
     volumes:
       - /root/skurchev/workspace/wam-stack/src:/workspace/wam:rw
       - /root/skurchev/workspace/wam-stack/checkpoints:/workspace/wam/checkpoints:ro
+      - /root/skurchev/workspace/wam-stack/media:/workspace/wam/media:rw
       - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=all

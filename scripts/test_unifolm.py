@@ -36,7 +36,7 @@ def test_unifolm_inference():
     print("=" * 70 + "\n")
 
     # Test 1: Initialize model (test mode)
-    print("[TEST 1] Initialize UnifoLM in test mode (arm clapping demo)")
+    print("[TEST 1] Initialize UnifoLM in test mode (arm extending forward demo)")
     print("-" * 70)
     try:
         model = UnifoLMModel(checkpoint=None, test_mode=True)

@@ -10,8 +10,10 @@ To swap models set WAM_MODEL env var: unifolm | eva
 
 import os
 import time
+import signal
 
 from dds_interface import DDSInterface
+from recording import MediaRecorder
 
 STATUS_LOG_INTERVAL = 5.0  # seconds between periodic status lines
 
@@ -46,11 +48,14 @@ def main():
     model_name = os.environ.get("WAM_MODEL", "stub")
     checkpoint  = os.environ.get("WAM_CHECKPOINT") or None
     dds_iface   = os.environ.get("DDS_IFACE", "lo")
+    media_dir   = os.environ.get("WAM_MEDIA_DIR", "/workspace/wam/media")
 
     print(f"[WAM] starting  model={model_name}  checkpoint={checkpoint}  iface={dds_iface}", flush=True)
 
     dds = DDSInterface(iface=dds_iface)
     dds.init()
+
+    recorder = MediaRecorder(media_dir=media_dir)
 
     model = load_model(model_name, checkpoint)
     print(f"[WAM] model loaded ({model_name}). Waiting for rt/lowstate from Isaac Sim...", flush=True)
@@ -71,27 +76,50 @@ def main():
     last_status_t = time.time()
     last_cmd = (0.0, 0.0, 0.0)
 
-    while True:
-        t0 = time.time()
+    def graceful_shutdown(signum, frame):
+        """Handle Ctrl+C to finalize recording."""
+        print(f"\n[WAM] received SIGINT, finalizing recording...", flush=True)
+        recorder.finalize()
+        exit(0)
 
-        state = dds.get_state()
-        vx, vy, wz, body_height = model(state)
-        dds.send_command(vx, vy, wz, body_height=body_height)
-        last_cmd = (vx, vy, wz)
-        loop_count += 1
+    signal.signal(signal.SIGINT, graceful_shutdown)
 
-        now = time.time()
-        if now - last_status_t >= STATUS_LOG_INTERVAL:
-            age = now - state.timestamp
-            print(
-                f"[WAM] loop={loop_count}  cmd=[vx={last_cmd[0]:.2f} vy={last_cmd[1]:.2f} wz={last_cmd[2]:.2f}]"
-                f"  state_age={age*1000:.0f}ms  q0={state.q[0]:.3f}",
-                flush=True,
-            )
-            last_status_t = now
+    try:
+        while True:
+            t0 = time.time()
 
-        elapsed = time.time() - t0
-        time.sleep(max(0.0, dt - elapsed))
+            state = dds.get_state()
+
+            # Record input state
+            input_frame_path = recorder.save_input_frame(loop_count, state)
+
+            vx, vy, wz, body_height = model(state)
+            dds.send_command(vx, vy, wz, body_height=body_height)
+            last_cmd = (vx, vy, wz)
+
+            # Record command output
+            recorder.save_command(loop_count, vx, vy, wz, body_height)
+
+            # Try to save Isaac Sim frame (if available)
+            isaac_frame_path = recorder.save_isaac_frame(loop_count)
+
+            loop_count += 1
+
+            now = time.time()
+            if now - last_status_t >= STATUS_LOG_INTERVAL:
+                age = now - state.timestamp
+                print(
+                    f"[WAM] loop={loop_count}  cmd=[vx={last_cmd[0]:.2f} vy={last_cmd[1]:.2f} wz={last_cmd[2]:.2f}]"
+                    f"  state_age={age*1000:.0f}ms  q0={state.q[0]:.3f}",
+                    flush=True,
+                )
+                last_status_t = now
+
+            elapsed = time.time() - t0
+            time.sleep(max(0.0, dt - elapsed))
+    except KeyboardInterrupt:
+        recorder.finalize()
+        raise
 
 
 if __name__ == "__main__":

@@ -4,13 +4,13 @@ Repo: https://github.com/unitreerobotics/unifolm-world-model-action
 
 Loads UnifoLM-WMA-0 world action model for G1 robot control.
 Input: Robot state (29-DOF joint positions/velocities).
-Output: Velocity commands (vx, vy, wz) for GEAR-SONIC WBC.
+Output: Velocity commands (vx, vy, wz, body_height) for GEAR-SONIC WBC.
 
 Supports:
   - Loading from HuggingFace Hub (hf_hub_id)
   - Loading from local checkpoint (file path)
   - Inference with GPU (if available)
-  - Test mode: arm clapping demo (no checkpoint needed)
+  - Test mode: arm extending forward demo (no checkpoint needed)
 """
 
 import os
@@ -42,7 +42,7 @@ class UnifoLMModel:
         Args:
             checkpoint: Path to local checkpoint or HuggingFace Hub ID (e.g., "org/model-name")
                        If None, automatically uses test_mode=True.
-            test_mode: If True, use heuristic arm clapping demo (ignore checkpoint).
+            test_mode: If True, use heuristic arm extending demo (ignore checkpoint).
                       If None (default), auto-detect based on checkpoint (True if None, False if set).
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -58,7 +58,7 @@ class UnifoLMModel:
         self.test_mode = test_mode
 
         if test_mode:
-            print("[UnifoLM] Running in TEST MODE (arm clapping demo, no model loading)", flush=True)
+            print("[UnifoLM] Running in TEST MODE (arm extending forward demo, no model loading)", flush=True)
             return
 
         if checkpoint is None:
@@ -145,7 +145,7 @@ class UnifoLMModel:
             (vx, vy, wz, body_height) commands for GEAR-SONIC
         """
         if self.test_mode:
-            return self._arm_clapping_demo(state)
+            return self._arm_extend_demo(state)
 
         if self.model is None:
             raise RuntimeError("Model not loaded. Set WAM_CHECKPOINT or use test_mode=True.")
@@ -172,56 +172,53 @@ class UnifoLMModel:
             print(f"[UnifoLM] Inference error: {e}", flush=True)
             return 0.0, 0.0, 0.0, 0.0
 
-    def _arm_clapping_demo(self, state: RobotState) -> tuple[float, float, float]:
+    def _arm_extend_demo(self, state: RobotState) -> tuple[float, float, float, float]:
         """
-        Demo: Arm clapping in place.
+        Demo: Extend arms forward in place.
 
-        Robot stays still (vx=0, vy=0, wz=0) and claps arms in cycle:
-          - Phase 1 (0.0–0.25): Arms opening
-          - Phase 2 (0.25–0.5): Arms closing → CLAP!
-          - Phase 3 (0.5–0.75): Arms open again
-          - Phase 4 (0.75–1.0): Return to rest
-          - Repeat every 4 seconds at 10 Hz (40 steps per clap cycle)
+        Robot stays still (vx=0, vy=0, wz=0) and extends arms forward in cycle:
+          - Phase 1 (0.0–0.33): Arms extending forward
+          - Phase 2 (0.33–0.66): Arms fully extended (hold position)
+          - Phase 3 (0.66–1.0): Arms retracting to rest
+          - Repeat every 3 seconds at 10 Hz (30 steps per cycle)
 
         The arm motion is handled by GEAR-SONIC WBC.
-        We just stay in place: vx=0, vy=0, wz=0 (all body motion commands = 0).
+        We stay in place: vx=0, vy=0, wz=0 (all body motion commands = 0).
+        Body_height signal indicates arm extension: positive=extending, negative=retracting.
         """
         self.step_count += 1
 
-        # Clap cycle: 4 seconds per cycle (40 steps at 10 Hz)
-        cycle_length = 40
+        # Extension cycle: 3 seconds per cycle (30 steps at 10 Hz)
+        cycle_length = 30
         cycle_pos = self.step_count % cycle_length
         phase = cycle_pos / cycle_length  # Normalize to [0, 1)
 
-        # Arms motion phases (GEAR-SONIC will execute the actual arm targets)
-        if phase < 0.25:
-            # Phase 1: Arms opening
-            arm_state = "OPENING"
-            arm_effort = phase / 0.25  # Ramp 0 → 1
-        elif phase < 0.5:
-            # Phase 2: Arms closing (CLAP!)
-            arm_state = "CLAPPING"
-            arm_effort = 1.0 - (phase - 0.25) / 0.25  # Ramp 1 → 0
-        elif phase < 0.75:
-            # Phase 3: Arms open again
-            arm_state = "OPEN"
-            arm_effort = -(phase - 0.5) / 0.25  # Ramp 0 → -1
+        # Arm extension phases (GEAR-SONIC will execute the actual arm targets)
+        if phase < 0.33:
+            # Phase 1: Arms extending forward
+            arm_state = "EXTENDING"
+            arm_effort = phase / 0.33  # Ramp 0 → 1
+        elif phase < 0.66:
+            # Phase 2: Arms fully extended (hold)
+            arm_state = "EXTENDED"
+            arm_effort = 1.0
         else:
-            # Phase 4: Return to rest
-            arm_state = "RESTING"
-            arm_effort = -1.0 + (phase - 0.75) / 0.25  # Ramp -1 → 0
+            # Phase 3: Arms retracting to rest
+            arm_state = "RETRACTING"
+            arm_effort = 1.0 - (phase - 0.66) / 0.34  # Ramp 1 → 0
 
         # Body commands: STAY IN PLACE
         vx = 0.0  # No forward/back motion
         vy = 0.0  # No left/right motion
         wz = 0.0  # No rotation
 
-        # Use body_height to signal arm motion to GEAR-SONIC
-        # When clapping (effort > 0), increase body_height to trigger arm movement
+        # Use body_height to signal arm extension to GEAR-SONIC
+        # Positive body_height (up to 0.15) triggers arm extension forward
+        # Zero body_height keeps arms at rest
         # This is a proxy signal: GEAR-SONIC will adjust arm targets based on body_height
         body_height = arm_effort * 0.15  # Scale to reasonable height range
 
-        # Log every clap cycle (every 40 steps)
+        # Log every extension cycle (every 30 steps)
         if cycle_pos == 0 and self.step_count > 1:
             cycle_number = self.step_count // cycle_length
             print(
@@ -229,7 +226,7 @@ class UnifoLMModel:
                 flush=True,
             )
             print(
-                f"[UnifoLM CLAP] CYCLE #{cycle_number} COMPLETE! Arms ready for next clap...",
+                f"[UnifoLM EXTEND] CYCLE #{cycle_number} COMPLETE! Arms ready for next extension...",
                 flush=True,
             )
             print(
@@ -242,7 +239,7 @@ class UnifoLMModel:
             cycle_number = self.step_count // cycle_length
             cycle_progress = (cycle_pos / cycle_length) * 100
             print(
-                f"[UnifoLM CLAP] cycle={cycle_number}  progress={cycle_progress:5.1f}%  "
+                f"[UnifoLM EXTEND] cycle={cycle_number}  progress={cycle_progress:5.1f}%  "
                 f"state={arm_state:8s}  effort={arm_effort:+.2f}  "
                 f"body=[vx={vx:.1f} vy={vy:.1f} wz={wz:.1f} h={body_height:+.2f}]",
                 flush=True,
@@ -260,11 +257,11 @@ if __name__ == "__main__":
     print("\n=== UnifoLM Test Mode ===\n", flush=True)
 
     # Test 1: Create model in test mode (no checkpoint needed)
-    print("[Test 1] Initializing in test mode (arm clapping demo)...", flush=True)
+    print("[Test 1] Initializing in test mode (arm extending forward demo)...", flush=True)
     model = UnifoLMModel(checkpoint=None, test_mode=True)
 
     # Test 2: Mock robot state
-    print("\n[Test 2] Running 5 seconds of inference with mock state...", flush=True)
+    print("\n[Test 2] Running 10 seconds of inference with mock state...", flush=True)
     mock_state = RobotState(
         q=[0.0] * 29,  # Joint positions
         dq=[0.0] * 29,  # Joint velocities
