@@ -32,7 +32,7 @@ services:
       - PRIVACY_CONSENT=Y
       - DISPLAY=:99
       - G1_TRAINING_ASSET_DIR=/workspace/assets
-      - SCENE_FILE=${SCENE_FILE:-}
+      - SCENE_FILE=${SCENE_FILE:-/root/skurchev/workspace/assets/office_demo.usdz}
       - ROBOT_USD_FILE=${ROBOT_USD_FILE:-g1_29dof.usd}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
