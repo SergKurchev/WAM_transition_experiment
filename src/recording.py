@@ -74,10 +74,15 @@ class MediaRecorder:
         self._init_camera_shm()
 
         self.frame_count = 0
+        self.prune_keep_count = 10  # Keep first 10 and last 10 files
+        self.last_prune_time = time.time()
+        self.prune_interval = 3600  # Prune every hour
+
         print(f"[RECORDING] Media directory: {self.media_dir.resolve()}", flush=True)
         print(f"[RECORDING] Task prompt: {self.prompt}", flush=True)
         print(f"[RECORDING] Command log: {self.command_log_file.resolve()}", flush=True)
         print(f"[RECORDING] Camera: ROS2 /g1/camera/color/image_raw (D435i)", flush=True)
+        print(f"[RECORDING] Auto-pruning: keep first/last {self.prune_keep_count} files per directory (every {self.prune_interval}s)", flush=True)
 
     def _init_camera_shm(self):
         """Initialize shared memory camera (reads from /run/mws/camera.rgb)."""
@@ -133,6 +138,12 @@ class MediaRecorder:
         with open(self.command_log_file, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([timestamp, step, f"{vx:.4f}", f"{vy:.4f}", f"{wz:.4f}", f"{body_height:.4f}"])
+
+        # Auto-prune every hour to prevent disk overflow
+        current_time = time.time()
+        if current_time - self.last_prune_time > self.prune_interval:
+            self._auto_prune()
+            self.last_prune_time = current_time
 
     def save_model_output(self, step: int, video_output) -> str | None:
         """Save model-generated video prediction.
@@ -226,6 +237,23 @@ class MediaRecorder:
             return str(camera_dest.resolve())
         except Exception as e:
             return None
+
+    def _auto_prune(self):
+        """Automatically prune old files every hour to prevent disk overflow."""
+        patterns = {
+            self.model_video_dir: "output_*.npz",
+            self.robot_camera_dir: "camera_*.png",
+            self.input_frames_dir: "state_*.txt",
+            self.isaac_frames_dir: "isaac_*.png",
+        }
+
+        total_deleted = 0
+        for directory, pattern in patterns.items():
+            deleted = self._prune_recordings(directory, pattern, self.prune_keep_count)
+            total_deleted += deleted
+
+        if total_deleted > 0:
+            print(f"[RECORDING] Auto-pruned {total_deleted} files (keeping first/last {self.prune_keep_count})", flush=True)
 
     def _prune_recordings(self, directory: Path, pattern: str, keep_count: int = 10) -> int:
         """Keep only first & last N files, delete the middle ones (save space).
