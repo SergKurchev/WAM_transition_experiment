@@ -2,18 +2,20 @@
 # Copy WAM media (frames, logs, video) from server to local machine
 #
 # Usage:
-#   bash scripts/copy-media-from-server.sh [--all] [--frames-only] [--logs-only]
+#   bash scripts/copy-media-from-server.sh [--all] [--frames-only] [--logs-only] [--scenes]
 #
 # What it does:
 #   - Connects to GPU-01 server via SSH
-#   - Copies /root/skurchev/workspace/wam-stack/media/ to local
+#   - Copies /root/skurchev/workspace/wam-stack/media/ to local (frames, logs)
+#   - Optionally copies /root/skurchev/workspace/assets/ USD scenes
 #   - Preserves directory structure and timestamps
 #   - Logs full destination paths
 #
 # Examples:
-#   bash scripts/copy-media-from-server.sh              # Copy all media
+#   bash scripts/copy-media-from-server.sh              # Copy all media (frames + logs)
 #   bash scripts/copy-media-from-server.sh --frames-only  # Copy only frames
 #   bash scripts/copy-media-from-server.sh --logs-only    # Copy only logs
+#   bash scripts/copy-media-from-server.sh --scenes      # Copy USD scene files only
 
 set -e
 
@@ -24,7 +26,8 @@ set -e
 SERVER_USER="root"
 SERVER_IP="176.109.83.84"
 SERVER_PORT="2221"
-SERVER_PATH="/root/skurchev/workspace/wam-stack/media"
+SERVER_MEDIA_PATH="/root/skurchev/workspace/wam-stack/media"
+SERVER_SCENES_PATH="/root/skurchev/workspace/assets"
 LOCAL_KEY="$HOME/.ssh/id_ed25519"
 
 # Colors
@@ -43,18 +46,27 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 COPY_FRAMES=true
 COPY_LOGS=true
+COPY_SCENES=false
 
 for arg in "$@"; do
     case "$arg" in
         --frames-only)
             COPY_LOGS=false
+            COPY_SCENES=false
             ;;
         --logs-only)
             COPY_FRAMES=false
+            COPY_SCENES=false
+            ;;
+        --scenes)
+            COPY_FRAMES=false
+            COPY_LOGS=false
+            COPY_SCENES=true
             ;;
         --all)
             COPY_FRAMES=true
             COPY_LOGS=true
+            COPY_SCENES=false
             ;;
         *)
             log_warn "Unknown argument: $arg"
@@ -85,8 +97,57 @@ fi
 # Main
 # ============================================================================
 
+# ============================================================================
+# Copy scenes (USD files)
+# ============================================================================
+if [[ "$COPY_SCENES" == "true" ]]; then
+    log_info "Copying USD scene files from server..."
+    echo "  From: $SERVER_USER@$SERVER_IP:$SERVER_SCENES_PATH"
+
+    LOCAL_SCENES_DIR="$STACK_ROOT/scenes_local"
+    mkdir -p "$LOCAL_SCENES_DIR"
+    echo "  To:   $LOCAL_SCENES_DIR"
+    echo ""
+
+    # Get list of USD/USDZ files from server
+    FILES=$(ssh -p $SERVER_PORT -i $LOCAL_KEY -o StrictHostKeyChecking=no \
+        "$SERVER_USER@$SERVER_IP" \
+        "find $SERVER_SCENES_PATH -maxdepth 1 -type f \( -name '*.usdz' -o -name '*.usd' \) 2>/dev/null" | tr '\n' ' ')
+
+    if [[ -z "$FILES" ]]; then
+        log_warn "No USD/USDZ files found on server at $SERVER_SCENES_PATH"
+    else
+        for file in $FILES; do
+            filename=$(basename "$file")
+            log_info "Copying $filename..."
+            scp -P $SERVER_PORT -i $LOCAL_KEY -o StrictHostKeyChecking=no \
+                "$SERVER_USER@$SERVER_IP:$file" \
+                "$LOCAL_SCENES_DIR/$filename" 2>/dev/null || log_warn "Failed to copy $filename"
+        done
+    fi
+
+    echo ""
+    echo -e "${GREEN}================================${NC}"
+    log_info "Scene files copied to:"
+    FINAL_PATH=$(cd "$LOCAL_SCENES_DIR" 2>/dev/null && pwd || echo "$LOCAL_SCENES_DIR")
+    echo "  $FINAL_PATH"
+    echo -e "${GREEN}================================${NC}"
+
+    # List copied files
+    if [[ -d "$LOCAL_SCENES_DIR" ]]; then
+        echo ""
+        log_info "Downloaded files:"
+        find "$LOCAL_SCENES_DIR" -maxdepth 1 -type f \( -name '*.usdz' -o -name '*.usd' \) -exec bash -c 'echo "  $(basename {}) ($(stat -f%z {} 2>/dev/null || stat -c%s {} 2>/dev/null | awk "{print int(\$1/1024/1024)}") MB)"' \;
+    fi
+
+    exit 0
+fi
+
+# ============================================================================
+# Copy media (frames, logs)
+# ============================================================================
 log_info "Copying media from server..."
-echo "  From: $SERVER_USER@$SERVER_IP:$SERVER_PATH"
+echo "  From: $SERVER_USER@$SERVER_IP:$SERVER_MEDIA_PATH"
 echo "  To:   $LOCAL_MEDIA_DIR"
 echo ""
 
@@ -102,7 +163,7 @@ fi
 rsync -avz \
     -e "ssh -p $SERVER_PORT -i $LOCAL_KEY -o StrictHostKeyChecking=no" \
     "${RSYNC_EXCLUDE[@]}" \
-    "$SERVER_USER@$SERVER_IP:$SERVER_PATH/" \
+    "$SERVER_USER@$SERVER_IP:$SERVER_MEDIA_PATH/" \
     "$LOCAL_MEDIA_DIR/" \
     2>/dev/null | grep -E "^(input_frames|command_logs|isaac_frames|sending|receiving|total|\..*)" || true
 

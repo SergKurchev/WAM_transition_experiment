@@ -72,21 +72,23 @@ class UnifoLMModel:
         self._load_model(checkpoint)
 
     def _load_model(self, checkpoint: str) -> None:
-        """Load model from checkpoint (local file or HuggingFace Hub)."""
+        """Load model from checkpoint (HuggingFace Hub preferred)."""
         checkpoint = checkpoint.strip()
 
-        # Try local file first (has .pt extension or file exists)
-        if os.path.isfile(checkpoint):
-            self._load_from_local(checkpoint)
-        # Try HuggingFace Hub (format: "org/model-name", no / in actual path)
-        elif "/" in checkpoint and not checkpoint.endswith(".pt"):
+        # Try HuggingFace Hub first (format: "org/model-name")
+        if "/" in checkpoint and not checkpoint.endswith(".ckpt") and not checkpoint.endswith(".pt"):
             self._load_from_hf_hub(checkpoint)
+        # Try local file as fallback (includes .ckpt, .pt)
+        elif os.path.isfile(checkpoint):
+            # For local .ckpt files, prefer HuggingFace Hub to get full architecture
+            print(f"[UnifoLM] Note: Local .ckpt file detected. For full video generation support, prefer HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0')", flush=True)
+            self._load_from_local(checkpoint)
         else:
             raise FileNotFoundError(
                 f"Checkpoint not found: {checkpoint!r}\n"
                 f"Expected either:\n"
-                f"  - Local file path (e.g., '/path/to/model.pt')\n"
-                f"  - HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0')"
+                f"  - HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0') [RECOMMENDED for video generation]\n"
+                f"  - Local file path (e.g., '/path/to/model.pt')"
             )
 
     def _load_from_hf_hub(self, hf_hub_id: str) -> None:
@@ -104,22 +106,43 @@ class UnifoLMModel:
             raise RuntimeError(f"Failed to load from HuggingFace Hub '{hf_hub_id}': {e}")
 
     def _load_from_local(self, checkpoint_path: str) -> None:
-        """Load model from local checkpoint file."""
+        """Load model from local checkpoint file (PyTorch or PyTorch Lightning)."""
         try:
             print(f"[UnifoLM] Loading from local checkpoint: {checkpoint_path}", flush=True)
             checkpoint_path = Path(checkpoint_path).resolve()
 
             # Load PyTorch checkpoint
-            state_dict = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
-            # Try to infer model architecture from checkpoint
-            if isinstance(state_dict, dict) and "model" in state_dict:
-                state_dict = state_dict["model"]
+            # Handle PyTorch Lightning format
+            if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                print(f"[UnifoLM] Detected PyTorch Lightning checkpoint format", flush=True)
+                state_dict = ckpt["state_dict"]
+                # Remove 'model.' prefix if present (PyTorch Lightning convention)
+                state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+            elif isinstance(ckpt, dict) and "model" in ckpt:
+                print(f"[UnifoLM] Found 'model' key in checkpoint", flush=True)
+                state_dict = ckpt["model"]
+            elif isinstance(ckpt, dict):
+                state_dict = ckpt
+            else:
+                raise RuntimeError(f"Unexpected checkpoint format: {type(ckpt)}")
 
-            # Simple model: MLP wrapper
-            self.model = self._build_model()
+            # Analyze output layer to determine output dimensions
+            output_dims = self._infer_output_dims(state_dict)
+            print(f"[UnifoLM] Inferred output dimensions: {output_dims}", flush=True)
+
+            # Build model with correct output dimensions
+            self.model = self._build_model(output_dims=output_dims)
+
+            # Load state dict with non-strict mode to handle architecture mismatches
             if isinstance(state_dict, dict):
-                self.model.load_state_dict(state_dict, strict=False)
+                missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+                if missing:
+                    print(f"[UnifoLM] Missing keys: {len(missing)}", flush=True)
+                if unexpected:
+                    print(f"[UnifoLM] Unexpected keys: {len(unexpected)}", flush=True)
+
             self.model = self.model.to(self.device)
             self.model.eval()
 
@@ -127,8 +150,31 @@ class UnifoLMModel:
         except Exception as e:
             raise RuntimeError(f"Failed to load checkpoint '{checkpoint_path}': {e}")
 
-    def _build_model(self) -> nn.Module:
+    def _infer_output_dims(self, state_dict: dict) -> int:
+        """Try to infer output dimensions from checkpoint state dict."""
+        print(f"[UnifoLM] Analyzing checkpoint structure ({len(state_dict)} keys)...", flush=True)
+
+        # Print first 10 keys for debugging
+        for i, key in enumerate(list(state_dict.keys())[:10]):
+            param = state_dict[key]
+            shape_str = str(param.shape) if hasattr(param, "shape") else str(type(param))
+            print(f"  [{i}] {key}: {shape_str}", flush=True)
+
+        # Look for final output layer
+        for key, param in state_dict.items():
+            if "output" in key.lower() or "head" in key.lower():
+                if hasattr(param, "shape") and len(param.shape) >= 1:
+                    out_dim = int(param.shape[-1])
+                    print(f"[UnifoLM] Found output layer '{key}' with dimension {out_dim}", flush=True)
+                    return out_dim
+
+        print(f"[UnifoLM] No output layer found in state dict, using default {self.output_dim}", flush=True)
+        return self.output_dim
+
+    def _build_model(self, output_dims: int | None = None) -> nn.Module:
         """Build a simple MLP model (fallback for checkpoint loading)."""
+        if output_dims is None:
+            output_dims = self.output_dim
         return nn.Sequential(
             nn.Linear(self.input_dim, 256),
             nn.ReLU(),
@@ -136,7 +182,7 @@ class UnifoLMModel:
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, self.output_dim),
+            nn.Linear(64, output_dims),
         )
 
     def __call__(self, state: RobotState) -> tuple:
@@ -158,23 +204,51 @@ class UnifoLMModel:
             raise RuntimeError("Model not loaded. Set WAM_CHECKPOINT or use test_mode=True.")
 
         try:
+            self.step_count += 1
+
             # Prepare input: concatenate joint positions and velocities
             q = np.array(state.q, dtype=np.float32)
             dq = np.array(state.dq, dtype=np.float32)
             obs = np.concatenate([q, dq])[:self.input_dim]
+
+            vx, vy, wz, body_height, video_output = 0.0, 0.0, 0.0, 0.0, None
 
             # Inference
             with torch.no_grad():
                 obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(self.device)
                 output = self.model(obs_tensor)
 
-                # Extract action (first 3-4 dims: vx, vy, wz, [body_height])
-                action = output[0, :3].cpu().numpy()
-                vx, vy, wz = action[0], action[1], action[2]
-                body_height = float(output[0, 3].cpu().numpy()) if output.shape[1] > 3 else 0.0
+                # Handle different model output formats
+                # unifolm_v1.pt: outputs only [1, 3] (vx, vy, wz)
+                # Full WMA: outputs [1, 4+] (vx, vy, wz, body_height, [video...])
 
-                # Extract video output if model generates it (dims > 4)
-                video_output = output[:, 4:].cpu() if output.shape[1] > 4 else None
+                if isinstance(output, torch.Tensor):
+                    output_shape = output.shape
+
+                    # Debug: log output shape every 100 steps
+                    if self.step_count % 100 == 0:
+                        print(f"[UnifoLM] Model output shape: {output_shape}  step={self.step_count}", flush=True)
+
+                    if output_shape[1] >= 3:
+                        # Extract first 3 values (vx, vy, wz)
+                        vx = float(output[0, 0].cpu().numpy())
+                        vy = float(output[0, 1].cpu().numpy())
+                        wz = float(output[0, 2].cpu().numpy())
+
+                        # Body height (optional, for newer models)
+                        if output_shape[1] > 3:
+                            body_height = float(output[0, 3].cpu().numpy())
+                        else:
+                            body_height = 0.0
+
+                        # Video output (optional, for full WMA model)
+                        if output_shape[1] > 4:
+                            video_output = output[:, 4:].cpu()
+                        else:
+                            video_output = None
+                    else:
+                        print(f"[UnifoLM] Warning: Model output shape {output_shape} too small, using zero actions", flush=True)
+                        return 0.0, 0.0, 0.0, 0.0, None
 
             # Clamp action to reasonable ranges
             vx = float(np.clip(vx, -1.0, 1.0))
@@ -184,6 +258,8 @@ class UnifoLMModel:
             return vx, vy, wz, body_height, video_output
         except Exception as e:
             print(f"[UnifoLM] Inference error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return 0.0, 0.0, 0.0, 0.0, None
 
     def _arm_extend_demo(self, state: RobotState) -> tuple[float, float, float, float]:
