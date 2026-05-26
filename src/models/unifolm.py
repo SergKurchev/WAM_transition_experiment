@@ -139,18 +139,20 @@ class UnifoLMModel:
             nn.Linear(64, self.output_dim),
         )
 
-    def __call__(self, state: RobotState) -> tuple[float, float, float, float]:
+    def __call__(self, state: RobotState) -> tuple:
         """
-        Run inference to generate velocity and height commands.
+        Run inference to generate velocity commands and optionally video prediction.
 
         Args:
             state: RobotState (q, dq, tau with 29-DOF measurements)
 
         Returns:
-            (vx, vy, wz, body_height) commands for GEAR-SONIC
+            (vx, vy, wz, body_height, video_output)
+            where video_output is torch.Tensor or numpy array if model generates it, else None
         """
         if self.test_mode:
-            return self._arm_extend_demo(state)
+            vx, vy, wz, body_height = self._arm_extend_demo(state)
+            return vx, vy, wz, body_height, None
 
         if self.model is None:
             raise RuntimeError("Model not loaded. Set WAM_CHECKPOINT or use test_mode=True.")
@@ -165,17 +167,24 @@ class UnifoLMModel:
             with torch.no_grad():
                 obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(self.device)
                 output = self.model(obs_tensor)
-                vx, vy, wz = output[0, :3].cpu().numpy()
 
-            # Clamp to reasonable ranges
+                # Extract action (first 3-4 dims: vx, vy, wz, [body_height])
+                action = output[0, :3].cpu().numpy()
+                vx, vy, wz = action[0], action[1], action[2]
+                body_height = float(output[0, 3].cpu().numpy()) if output.shape[1] > 3 else 0.0
+
+                # Extract video output if model generates it (dims > 4)
+                video_output = output[:, 4:].cpu() if output.shape[1] > 4 else None
+
+            # Clamp action to reasonable ranges
             vx = float(np.clip(vx, -1.0, 1.0))
             vy = float(np.clip(vy, -1.0, 1.0))
             wz = float(np.clip(wz, -np.pi, np.pi))
 
-            return vx, vy, wz, 0.0
+            return vx, vy, wz, body_height, video_output
         except Exception as e:
             print(f"[UnifoLM] Inference error: {e}", flush=True)
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, None
 
     def _arm_extend_demo(self, state: RobotState) -> tuple[float, float, float, float]:
         """

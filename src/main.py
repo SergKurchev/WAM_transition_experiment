@@ -94,12 +94,19 @@ def main():
             # Record input state
             input_frame_path = recorder.save_input_frame(loop_count, state)
 
-            vx, vy, wz, body_height = model(state)
+            result = model(state)
+            vx, vy, wz, body_height = result[0], result[1], result[2], result[3]
+            video_output = result[4] if len(result) > 4 else None
+
             dds.send_command(vx, vy, wz, body_height=body_height)
             last_cmd = (vx, vy, wz)
 
             # Record command output
             recorder.save_command(loop_count, vx, vy, wz, body_height)
+
+            # Record model video output if available
+            if video_output is not None:
+                recorder.save_model_output(loop_count, video_output)
 
             # Try to save Isaac Sim frame (if available)
             isaac_frame_path = recorder.save_isaac_frame(loop_count)

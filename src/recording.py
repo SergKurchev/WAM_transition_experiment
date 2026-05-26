@@ -134,6 +134,38 @@ class MediaRecorder:
             writer = csv.writer(f)
             writer.writerow([timestamp, step, f"{vx:.4f}", f"{vy:.4f}", f"{wz:.4f}", f"{body_height:.4f}"])
 
+    def save_model_output(self, step: int, video_output) -> str | None:
+        """Save model-generated video prediction.
+
+        Args:
+            step: Control loop step number
+            video_output: Tensor or array from model (video frames, latent codes, etc.)
+
+        Returns:
+            Full path to saved file, or None if save failed
+        """
+        if video_output is None:
+            return None
+
+        try:
+            import torch
+
+            # Convert to numpy if torch tensor
+            if isinstance(video_output, torch.Tensor):
+                video_data = video_output.detach().cpu().numpy()
+            else:
+                video_data = np.asarray(video_output)
+
+            # Save as compressed numpy array (.npz)
+            output_file = self.model_video_dir / f"output_{step:06d}.npz"
+            with open(output_file, 'wb') as f:
+                np.save(f, video_data, allow_pickle=False)
+
+            return str(output_file.resolve())
+        except Exception as e:
+            print(f"[RECORDING] Failed to save model output: {e}", flush=True)
+            return None
+
     def save_isaac_frame(self, step: int):
         """Copy Isaac Sim frame from /tmp/isaac_frame.png to media directory.
 
@@ -235,15 +267,18 @@ class MediaRecorder:
         input_files = sorted(list(self.input_frames_dir.glob("state_*.txt")))
         isaac_files = sorted(list(self.isaac_frames_dir.glob("isaac_*.png")))
         camera_files = sorted(list(self.robot_camera_dir.glob("camera_*.png")))
+        model_files = sorted(list(self.model_video_dir.glob("output_*.npz")))
 
         input_count_before = len(input_files)
         isaac_count_before = len(isaac_files)
         camera_count_before = len(camera_files)
+        model_count_before = len(model_files)
 
         # Prune: keep first 10 and last 10, delete middle
         input_deleted = self._prune_recordings(self.input_frames_dir, "state_*.txt", keep_count=10)
         isaac_deleted = self._prune_recordings(self.isaac_frames_dir, "isaac_*.png", keep_count=10)
         camera_deleted = self._prune_recordings(self.robot_camera_dir, "camera_*.png", keep_count=10)
+        model_deleted = self._prune_recordings(self.model_video_dir, "output_*.npz", keep_count=10)
 
         print(f"[RECORDING] Input frames: {input_count_before} recorded, {input_deleted} pruned → kept {input_count_before - input_deleted}", flush=True)
         print(f"            Location: {self.input_frames_dir.resolve()}", flush=True)
@@ -253,6 +288,9 @@ class MediaRecorder:
 
         print(f"[RECORDING] Robot camera frames: {camera_count_before} recorded, {camera_deleted} pruned → kept {camera_count_before - camera_deleted}", flush=True)
         print(f"            Location: {self.robot_camera_dir.resolve()}", flush=True)
+
+        print(f"[RECORDING] Model output frames: {model_count_before} recorded, {model_deleted} pruned → kept {model_count_before - model_deleted}", flush=True)
+        print(f"            Location: {self.model_video_dir.resolve()}", flush=True)
 
         print(f"[RECORDING] Command log (CSV):", flush=True)
         print(f"            {self.command_log_file.resolve()}", flush=True)
