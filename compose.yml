@@ -136,7 +136,7 @@ services:
       - PYTHONPATH=/workspace/wam:/workspace/unitree_sdk2py_src
       - PYTHONUNBUFFERED=1
       - WAM_MODEL=${WAM_MODEL:-unifolm}
-      - WAM_CHECKPOINT=${WAM_CHECKPOINT:-}
+      - WAM_CHECKPOINT=${WAM_CHECKPOINT:-/workspace/wam/checkpoints/unifolm_v1.pt}
       - WAM_PROMPT=${WAM_PROMPT:-pick and place green cube in white basket}
       - WAM_MEDIA_DIR=${WAM_MEDIA_DIR:-/workspace/wam/media}
       - DDS_IFACE=lo
