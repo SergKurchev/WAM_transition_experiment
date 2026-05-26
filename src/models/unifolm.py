@@ -35,21 +35,26 @@ class UnifoLMModel:
     Generates velocity commands from robot state observations.
     """
 
-    def __init__(self, checkpoint: str | None, test_mode: bool | None = None):
+    def __init__(self, checkpoint: str | None, test_mode: bool | None = None, prompt: str | None = None):
         """
         Initialize UnifoLM model.
 
         Args:
             checkpoint: Path to local checkpoint or HuggingFace Hub ID (e.g., "org/model-name")
                        If None, automatically uses test_mode=True.
-            test_mode: If True, use heuristic arm extending demo (ignore checkpoint).
+            test_mode: If True, use heuristic demo (ignore checkpoint).
                       If None (default), auto-detect based on checkpoint (True if None, False if set).
+            prompt: Task prompt (e.g., "pick and place green cube in white basket").
+                   Used to condition model output if vision system available.
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.input_dim = 29  # G1 has 29 DOF (q + dq interleaved)
         self.output_dim = 3  # (vx, vy, wz)
         self.step_count = 0
+        self.prompt = prompt or "default navigation"
+
+        print(f"[UnifoLM] Task prompt: {self.prompt}", flush=True)
 
         # Auto-detect test_mode if not explicitly set
         if test_mode is None:
@@ -58,7 +63,7 @@ class UnifoLMModel:
         self.test_mode = test_mode
 
         if test_mode:
-            print("[UnifoLM] Running in TEST MODE (arm extending forward demo, no model loading)", flush=True)
+            print(f"[UnifoLM] Running in TEST MODE (demo for task: {self.prompt})", flush=True)
             return
 
         if checkpoint is None:
@@ -174,6 +179,56 @@ class UnifoLMModel:
 
     def _arm_extend_demo(self, state: RobotState) -> tuple[float, float, float, float]:
         """
+        Demo behavior based on task prompt.
+
+        Supports:
+          - "pick and place": Walk towards table, pick green cube, place in basket
+          - default: Extend arms forward in place
+        """
+        self.step_count += 1
+
+        # Check if this is pick-and-place task
+        if "pick" in self.prompt.lower() and "place" in self.prompt.lower():
+            return self._pick_and_place_demo(state)
+        else:
+            return self._arm_extend_demo_original(state)
+
+    def _pick_and_place_demo(self, state: RobotState) -> tuple[float, float, float, float]:
+        """
+        Demo: Pick green cube from table and place in white basket.
+
+        Sequence (120 steps = 12 seconds at 10 Hz):
+          - Steps 0-30: Walk forward to table (0.3 m/s)
+          - Steps 30-60: Bend down and pick (arms down)
+          - Steps 60-90: Walk to basket (backward 0.2 m/s)
+          - Steps 90-120: Place cube in basket (arms up)
+          - Repeat cycle
+        """
+        cycle_length = 120
+        cycle_pos = self.step_count % cycle_length
+        phase = cycle_pos / cycle_length
+
+        if phase < 0.25:
+            # Walk forward to table
+            vx, vy, wz = 0.3, 0.0, 0.0
+            body_height = 0.0
+        elif phase < 0.5:
+            # Pick phase: stay, arms go down
+            vx, vy, wz = 0.0, 0.0, 0.0
+            body_height = -0.5  # Arm down signal
+        elif phase < 0.75:
+            # Walk backward to basket
+            vx, vy, wz = -0.2, 0.0, 0.0
+            body_height = -0.5
+        else:
+            # Place phase: stay, arms up
+            vx, vy, wz = 0.0, 0.0, 0.0
+            body_height = 0.5  # Arm up signal
+
+        return vx, vy, wz, body_height
+
+    def _arm_extend_demo_original(self, state: RobotState) -> tuple[float, float, float, float]:
+        """
         Demo: Extend arms forward in place.
 
         Robot stays still (vx=0, vy=0, wz=0) and extends arms forward in cycle:
@@ -186,8 +241,6 @@ class UnifoLMModel:
         We stay in place: vx=0, vy=0, wz=0 (all body motion commands = 0).
         Body_height signal indicates arm extension: positive=extending, negative=retracting.
         """
-        self.step_count += 1
-
         # Extension cycle: 3 seconds per cycle (30 steps at 10 Hz)
         cycle_length = 30
         cycle_pos = self.step_count % cycle_length

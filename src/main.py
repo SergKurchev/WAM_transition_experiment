@@ -20,11 +20,11 @@ STATUS_LOG_INTERVAL = 5.0  # seconds between periodic status lines
 
 # ── model registry ────────────────────────────────────────────────────────────
 
-def load_model(name: str, checkpoint: str | None):
+def load_model(name: str, checkpoint: str | None, prompt: str | None = None):
     """Return an inference callable: fn(state) -> (vx, vy, wz)."""
     if name == "unifolm":
         from models.unifolm import UnifoLMModel
-        return UnifoLMModel(checkpoint)
+        return UnifoLMModel(checkpoint, prompt=prompt)
     elif name == "eva":
         from models.eva import EVAModel
         return EVAModel(checkpoint)
@@ -47,17 +47,18 @@ CONTROL_HZ = 10   # command publish rate
 def main():
     model_name = os.environ.get("WAM_MODEL", "stub")
     checkpoint  = os.environ.get("WAM_CHECKPOINT") or None
+    prompt      = os.environ.get("WAM_PROMPT", "default")
     dds_iface   = os.environ.get("DDS_IFACE", "lo")
     media_dir   = os.environ.get("WAM_MEDIA_DIR", "/workspace/wam/media")
 
-    print(f"[WAM] starting  model={model_name}  checkpoint={checkpoint}  iface={dds_iface}", flush=True)
+    print(f"[WAM] starting  model={model_name}  checkpoint={checkpoint}  prompt={prompt}  iface={dds_iface}", flush=True)
 
     dds = DDSInterface(iface=dds_iface)
     dds.init()
 
-    recorder = MediaRecorder(media_dir=media_dir)
+    recorder = MediaRecorder(media_dir=media_dir, prompt=prompt)
 
-    model = load_model(model_name, checkpoint)
+    model = load_model(model_name, checkpoint, prompt=prompt)
     print(f"[WAM] model loaded ({model_name}). Waiting for rt/lowstate from Isaac Sim...", flush=True)
 
     wait_start = time.time()
@@ -102,6 +103,9 @@ def main():
 
             # Try to save Isaac Sim frame (if available)
             isaac_frame_path = recorder.save_isaac_frame(loop_count)
+
+            # Try to save robot camera frame (if available)
+            camera_frame_path = recorder.save_robot_camera_frame(loop_count)
 
             loop_count += 1
 

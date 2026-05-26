@@ -25,6 +25,7 @@ services:
       - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
       - /root/skurchev/workspace/mws-dimos/modules/gwbc/decoupled_wbc/control/robot_model/model_data/g1:/workspace/assets:ro
       - /root/skurchev/workspace/mws-dimos/assets/robots/g1:/workspace/robot_assets:ro
+      - /root/skurchev/workspace/assets:/workspace/scene_assets:rw
       - sim_bridge_shm:/run/mws
     environment:
       - ACCEPT_EULA=Y
@@ -32,7 +33,7 @@ services:
       - PRIVACY_CONSENT=Y
       - DISPLAY=:99
       - G1_TRAINING_ASSET_DIR=/workspace/assets
-      - SCENE_FILE=${SCENE_FILE:-/root/skurchev/workspace/assets/office_demo.usdz}
+      - SCENE_FILE=${SCENE_FILE:-mws_office.usdz}
       - ROBOT_USD_FILE=${ROBOT_USD_FILE:-g1_29dof.usd}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
@@ -128,13 +129,16 @@ services:
       - /root/skurchev/workspace/wam-stack/checkpoints:/workspace/wam/checkpoints:ro
       - /root/skurchev/workspace/wam-stack/media:/workspace/wam/media:rw
       - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - sim_bridge_shm:/run/mws
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - PYTHONPATH=/workspace/wam:/workspace/unitree_sdk2py_src
       - PYTHONUNBUFFERED=1
-      - WAM_MODEL=${WAM_MODEL:-stub}
+      - WAM_MODEL=${WAM_MODEL:-unifolm}
       - WAM_CHECKPOINT=${WAM_CHECKPOINT:-}
+      - WAM_PROMPT=${WAM_PROMPT:-pick and place green cube in white basket}
+      - WAM_MEDIA_DIR=${WAM_MEDIA_DIR:-/workspace/wam/media}
       - DDS_IFACE=lo
     runtime: nvidia
     shm_size: '4gb'
