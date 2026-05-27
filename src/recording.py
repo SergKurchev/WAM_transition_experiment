@@ -1,21 +1,30 @@
-"""Recording module for WAM inference: video, frames, and command logs.
+"""Recording module for WAM inference.
 
-Saves:
-  - input_frames/: RobotState visualization (q, dq, tau as text)
-  - command_logs/: Velocity commands (vx, vy, wz, body_height) as CSV
-  - robot_camera/: D435i camera frames from ROS2 /g1/camera/color/image_raw (1280x720 RGB)
-  - isaac_frames/: Screenshots from Isaac Sim (if available)
-  - model_output/: Model predictions (reserved for future video generation)
+Each inference step gets its own subfolder:
+
+    media/
+    ├── steps/
+    │   ├── step_000001/
+    │   │   ├── camera_input.png   ← D435i кадр (вход модели)
+    │   │   ├── state_input.txt    ← суставные углы/скорости (вход модели)
+    │   │   ├── model_output.mp4   ← видео предсказание (выход модели, 16 кадров)
+    │   │   └── isaac_input.png    ← скриншот Isaac Sim (если доступен)
+    │   ├── step_000002/
+    │   │   └── ...
+    │   └── ...  (хранятся только первые 10 + последние 10 шагов)
+    └── command_logs/
+        └── commands_YYYYMMDD_HHMMSS.csv
+
+Автопрунинг: после каждого сохранения model_output.mp4 удаляются средние шаги,
+остаются только первые KEEP_FIRST и последние KEEP_LAST папок.
 """
 
 import os
 import csv
+import shutil
 import time
-import threading
-import mmap
 from pathlib import Path
 from datetime import datetime
-from queue import Queue
 
 try:
     import numpy as np
@@ -27,134 +36,143 @@ try:
 except ImportError:
     Image = None
 
+KEEP_FIRST = 10   # сколько первых шагов хранить
+KEEP_LAST  = 10   # сколько последних шагов хранить
+
 
 class MediaRecorder:
-    """Record inference inputs, outputs, and camera frames from ROS2."""
+    """Запись входов и выходов WAM inference, сгруппированная по шагам."""
 
     def __init__(self, media_dir: str = "/workspace/wam/media", prompt: str = "default"):
-        """Initialize recording directories and ROS2 camera subscriber.
-
-        Args:
-            media_dir: Base directory for all media (will be created if missing)
-            prompt: Task prompt (logged for reference)
-        """
         self.media_dir = Path(media_dir)
-        self.media_dir.mkdir(parents=True, exist_ok=True)
         self.prompt = prompt
 
-        # Create subdirectories
-        self.input_frames_dir = self.media_dir / "input_frames"
+        # Директории
+        self.steps_dir       = self.media_dir / "steps"
         self.command_logs_dir = self.media_dir / "command_logs"
-        self.isaac_frames_dir = self.media_dir / "isaac_frames"
-        self.robot_camera_dir = self.media_dir / "robot_camera"
-        self.model_video_dir = self.media_dir / "model_output"
 
-        for d in [self.input_frames_dir, self.command_logs_dir, self.isaac_frames_dir,
-                  self.robot_camera_dir, self.model_video_dir]:
-            d.mkdir(exist_ok=True)
+        self.steps_dir.mkdir(parents=True, exist_ok=True)
+        self.command_logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # CSV log for commands
-        self.command_log_file = self.command_logs_dir / f"commands_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # Метаданные сессии
+        meta = self.media_dir / "session.txt"
+        with open(meta, "w") as f:
+            f.write(f"started:  {datetime.now().isoformat()}\n")
+            f.write(f"prompt:   {self.prompt}\n")
+            f.write(f"keeps:    first {KEEP_FIRST} + last {KEEP_LAST} steps\n")
+            f.write(f"camera:   D435i /run/mws/camera.rgb (1280×720 RGB)\n")
+
+        # CSV лог команд
+        self.command_log_file = (
+            self.command_logs_dir
+            / f"commands_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
         self._init_command_log()
 
-        # Write metadata file
-        metadata_file = self.media_dir / "metadata.txt"
-        with open(metadata_file, "w") as f:
-            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-            f.write(f"Task Prompt: {self.prompt}\n")
-            f.write(f"Media Directory: {self.media_dir.resolve()}\n")
-            f.write(f"Camera: Intel RealSense D435i (1280×720 RGB, 30 FPS)\n")
-            f.write(f"Camera Topic: /g1/camera/color/image_raw (ROS2)\n")
-
-        # Shared memory camera (read from /run/mws/camera.rgb, 1280×720 RGB)
-        self.camera_shm_path = "/run/mws/camera.rgb"
-        self.camera_shm_size = 1280 * 720 * 3  # RGB, 1280×720
-        self.camera_shm_map = None
-        self.latest_camera_frame = None
+        # Shared memory камера
+        self._camera_shm_path = "/run/mws/camera.rgb"
+        self._camera_shm_size = 1280 * 720 * 3
+        self._camera_shm_map  = None
         self._init_camera_shm()
 
-        self.frame_count = 0
-        self.prune_keep_count = 10  # Keep first 10 and last 10 files
-        self.last_prune_time = time.time()
-        self.prune_interval = 3600  # Prune every hour
+        print(f"[RECORDING] steps dir:   {self.steps_dir}", flush=True)
+        print(f"[RECORDING] command log: {self.command_log_file}", flush=True)
+        print(f"[RECORDING] pruning:     keep first {KEEP_FIRST} + last {KEEP_LAST} steps", flush=True)
 
-        print(f"[RECORDING] Media directory: {self.media_dir.resolve()}", flush=True)
-        print(f"[RECORDING] Task prompt: {self.prompt}", flush=True)
-        print(f"[RECORDING] Command log: {self.command_log_file.resolve()}", flush=True)
-        print(f"[RECORDING] Camera: ROS2 /g1/camera/color/image_raw (D435i)", flush=True)
-        print(f"[RECORDING] Auto-pruning: keep first/last {self.prune_keep_count} files per directory (every {self.prune_interval}s)", flush=True)
+    # ── internal helpers ──────────────────────────────────────────────────────
 
-    def _init_camera_shm(self):
-        """Initialize shared memory camera (reads from /run/mws/camera.rgb)."""
+    def _step_dir(self, step: int) -> Path:
+        """Вернуть (и создать) папку для шага step."""
+        d = self.steps_dir / f"step_{step:06d}"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def _init_camera_shm(self) -> None:
         if np is None:
-            print(f"[RECORDING] NumPy not available - camera frames disabled", flush=True)
             return
-
         try:
-            if not os.path.exists(self.camera_shm_path):
-                print(f"[RECORDING] Camera shared memory not found at {self.camera_shm_path}", flush=True)
+            if not os.path.exists(self._camera_shm_path):
+                print(f"[RECORDING] Camera SHM not found at {self._camera_shm_path}", flush=True)
                 return
-
-            self.camera_shm_map = open(self.camera_shm_path, "r+b")
-            print(f"[RECORDING] ✓ Camera SHM: {self.camera_shm_path} (D435i, 1280×720 RGB)", flush=True)
+            self._camera_shm_map = open(self._camera_shm_path, "r+b")
+            print(f"[RECORDING] ✓ Camera SHM: {self._camera_shm_path} (D435i, 1280×720 RGB)", flush=True)
         except Exception as e:
-            print(f"[RECORDING] Camera SHM init warning: {e} - continuing without camera", flush=True)
+            print(f"[RECORDING] Camera SHM warning: {e}", flush=True)
 
-    def _init_command_log(self):
-        """Initialize CSV file for command logging."""
+    def _init_command_log(self) -> None:
         with open(self.command_log_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp", "step", "vx", "vy", "wz", "body_height"])
+            csv.writer(f).writerow(["timestamp", "step", "action_norm", "traj_norm"])
 
-    def save_input_frame(self, step: int, state):
-        """Save RobotState as a text frame for inspection.
+    # ── public save API ───────────────────────────────────────────────────────
 
-        Args:
-            step: Control loop step number
-            state: RobotState object (q, dq, tau, timestamp)
+    def save_input_frame(self, step: int, state) -> str | None:
+        """Сохранить суставное состояние робота (вход модели).
+
+        Файл: steps/step_XXXXXX/state_input.txt
         """
-        frame_file = self.input_frames_dir / f"state_{step:06d}.txt"
+        try:
+            dest = self._step_dir(step) / "state_input.txt"
+            with open(dest, "w") as f:
+                f.write(f"step:      {step}\n")
+                f.write(f"timestamp: {state.timestamp}\n\n")
+                f.write(f"q  (joint positions,  {len(state.q)} DOF):\n")
+                f.write("  " + "  ".join(f"{v:+.4f}" for v in state.q) + "\n\n")
+                f.write(f"dq (joint velocities, {len(state.dq)} DOF):\n")
+                f.write("  " + "  ".join(f"{v:+.4f}" for v in state.dq) + "\n\n")
+                f.write(f"tau (joint torques,   {len(state.tau)} DOF):\n")
+                f.write("  " + "  ".join(f"{v:+.4f}" for v in state.tau) + "\n")
+            return str(dest)
+        except Exception as e:
+            print(f"[RECORDING] save_input_frame failed: {e}", flush=True)
+            return None
 
-        with open(frame_file, "w") as f:
-            f.write(f"Step: {step}\n")
-            f.write(f"Timestamp: {state.timestamp}\n\n")
-            f.write(f"Joint Positions (q) [{len(state.q)}]:\n")
-            f.write("  " + " ".join(f"{q:+.4f}" for q in state.q) + "\n\n")
-            f.write(f"Joint Velocities (dq) [{len(state.dq)}]:\n")
-            f.write("  " + " ".join(f"{dq:+.4f}" for dq in state.dq) + "\n\n")
-            f.write(f"Joint Torques (tau) [{len(state.tau)}]:\n")
-            f.write("  " + " ".join(f"{tau:+.4f}" for tau in state.tau) + "\n")
+    def save_robot_camera_frame(self, step: int) -> str | None:
+        """Сохранить кадр с D435i (вход модели).
 
-        return str(frame_file.resolve())
-
-    def save_command(self, step: int, vx: float, vy: float, wz: float, body_height: float):
-        """Log velocity command to CSV.
-
-        Args:
-            step: Control loop step number
-            vx, vy, wz, body_height: Command values
+        Файл: steps/step_XXXXXX/camera_input.png
         """
-        timestamp = datetime.now().isoformat()
-        with open(self.command_log_file, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([timestamp, step, f"{vx:.4f}", f"{vy:.4f}", f"{wz:.4f}", f"{body_height:.4f}"])
+        if np is None or self._camera_shm_map is None:
+            return None
+        try:
+            self._camera_shm_map.seek(0)
+            raw = self._camera_shm_map.read(self._camera_shm_size)
+            if len(raw) < self._camera_shm_size:
+                return None
+            rgb = np.frombuffer(raw, dtype=np.uint8).reshape(720, 1280, 3)
 
-        # Auto-prune every hour to prevent disk overflow
-        current_time = time.time()
-        if current_time - self.last_prune_time > self.prune_interval:
-            self._auto_prune()
-            self.last_prune_time = current_time
+            dest = self._step_dir(step) / "camera_input.png"
+            if Image is not None:
+                Image.fromarray(rgb, mode="RGB").save(str(dest))
+            else:
+                np.save(str(dest.with_suffix(".npy")), rgb)
+            return str(dest)
+        except Exception:
+            return None
+
+    def save_isaac_frame(self, step: int) -> str | None:
+        """Скопировать скриншот Isaac Sim редактора (если есть).
+
+        Файл: steps/step_XXXXXX/isaac_input.png
+        """
+        src = Path("/tmp/isaac_frame.png")
+        if not src.exists():
+            return None
+        try:
+            dest = self._step_dir(step) / "isaac_input.png"
+            shutil.copy2(src, dest)
+            return str(dest)
+        except Exception as e:
+            print(f"[RECORDING] save_isaac_frame failed: {e}", flush=True)
+            return None
 
     def save_model_output(self, step: int, video_output) -> str | None:
-        """Save model-generated video as MP4.
+        """Сохранить видео предсказание модели (выход модели).
 
-        Args:
-            step: Control loop step number
-            video_output: Tensor or array from model. Expected shape from
-                LatentVisualDiffusion: (B, C, T, H, W) in [-1, 1] range.
+        Файл: steps/step_XXXXXX/model_output.mp4
+        Формат входа: тензор (B,C,T,H,W) или (C,T,H,W) в диапазоне [-1,1].
 
-        Returns:
-            Full path to saved MP4, or None if save failed
+        После сохранения запускает прунинг: оставляет первые KEEP_FIRST
+        и последние KEEP_LAST шагов, удаляет средние.
         """
         if video_output is None:
             return None
@@ -163,206 +181,129 @@ class MediaRecorder:
             import cv2 as _cv2
             import torch
 
-            # --- 1. Convert to float32 numpy ---
+            # 1. → float32 numpy
             if isinstance(video_output, torch.Tensor):
                 arr = video_output.detach().cpu().float().numpy()
             else:
                 arr = np.array(video_output, dtype=np.float32)
 
-            # --- 2. Canonicalize to (T, H, W, C) ---
+            # 2. → (T, H, W, C)
             if arr.ndim == 5:
-                # (B, C, T, H, W) → take batch 0 → (C, T, H, W)
-                arr = arr[0]
+                arr = arr[0]                          # (B,C,T,H,W) → (C,T,H,W)
             if arr.ndim == 4:
-                # Detect (C, T, H, W) vs (T, H, W, C)
                 if arr.shape[0] in (1, 3, 4) and arr.shape[0] < arr.shape[1]:
-                    # (C, T, H, W) → (T, H, W, C)
-                    arr = arr.transpose(1, 2, 3, 0)
-                # else already (T, H, W, C)
+                    arr = arr.transpose(1, 2, 3, 0)   # (C,T,H,W) → (T,H,W,C)
 
-            # --- 3. Normalize to uint8 [0, 255] ---
+            # 3. → uint8 [0, 255]
             if arr.min() >= -1.5 and arr.max() <= 1.5:
-                # [-1, 1] → [0, 255]
-                arr = ((arr + 1.0) / 2.0 * 255.0)
+                arr = (arr + 1.0) / 2.0 * 255.0
             elif arr.max() <= 1.0:
                 arr = arr * 255.0
             arr = np.clip(arr, 0, 255).astype(np.uint8)
-
-            # Make contiguous (avoids negative stride errors from flip ops)
             arr = np.ascontiguousarray(arr)
 
-            # --- 4. Write with OpenCV (BGR order) ---
-            output_file = self.model_video_dir / f"output_{step:06d}.mp4"
+            # 4. Записать MP4 (OpenCV работает в BGR)
+            dest = self._step_dir(step) / "model_output.mp4"
             T, H, W, C = arr.shape
-            fourcc = _cv2.VideoWriter_fourcc(*'mp4v')
-            writer = _cv2.VideoWriter(str(output_file), fourcc, 10.0, (W, H))
-
+            fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
+            writer = _cv2.VideoWriter(str(dest), fourcc, 10.0, (W, H))
             for frame in arr:
                 if C == 3:
-                    # RGB → BGR for OpenCV
                     bgr = np.ascontiguousarray(frame[:, :, ::-1])
                 elif C == 1:
                     bgr = _cv2.cvtColor(frame, _cv2.COLOR_GRAY2BGR)
                 else:
-                    bgr = frame[:, :, :3]
-                    bgr = np.ascontiguousarray(bgr[:, :, ::-1])
+                    bgr = np.ascontiguousarray(frame[:, :, :3][:, :, ::-1])
                 writer.write(bgr)
-
             writer.release()
-            print(f"[RECORDING] Saved video: {output_file}", flush=True)
-            return str(output_file.resolve())
+
+            print(f"[RECORDING] step {step:06d} → {dest}", flush=True)
+
+            # 5. Прунинг: держим только первые + последние
+            self._prune_steps()
+
+            return str(dest)
 
         except Exception as e:
-            print(f"[RECORDING] Failed to save video: {e}", flush=True)
+            print(f"[RECORDING] save_model_output failed: {e}", flush=True)
             import traceback
             traceback.print_exc()
             return None
 
-    def save_isaac_frame(self, step: int):
-        """Copy Isaac Sim frame from /tmp/isaac_frame.png to media directory.
-
-        Args:
-            step: Control loop step number
-
-        Returns:
-            Full path to saved frame, or None if source doesn't exist
-        """
-        isaac_src = Path("/tmp/isaac_frame.png")
-        if not isaac_src.exists():
-            return None
-
-        isaac_dest = self.isaac_frames_dir / f"isaac_{step:06d}.png"
-
+    def save_command(self, step: int, action_norm: float = 0.0, traj_norm: float = 0.0) -> None:
+        """Добавить строку в CSV лог."""
         try:
-            import shutil
-            shutil.copy2(isaac_src, isaac_dest)
-            return str(isaac_dest.resolve())
-        except Exception as e:
-            print(f"[RECORDING] Failed to copy Isaac frame: {e}", flush=True)
-            return None
+            with open(self.command_log_file, "a", newline="") as f:
+                csv.writer(f).writerow([
+                    datetime.now().isoformat(), step,
+                    f"{action_norm:.4f}", f"{traj_norm:.4f}",
+                ])
+        except Exception:
+            pass
 
-    def save_robot_camera_frame(self, step: int):
-        """Save robot camera frame from shared memory /run/mws/camera.rgb.
+    # ── pruning ───────────────────────────────────────────────────────────────
 
-        Captures view from Intel RealSense D435i mounted on G1 head.
-        Resolution: 1280×720 RGB (sim) or 640×480 (real robot)
-
-        Args:
-            step: Control loop step number
+    def _prune_steps(self) -> int:
+        """Удалить средние шаги, оставив первые KEEP_FIRST и последние KEEP_LAST.
 
         Returns:
-            Full path to saved frame, or None if no frame available
+            Количество удалённых папок.
         """
-        if np is None or self.camera_shm_map is None:
-            return None
-
-        try:
-            # Read RGB bytes from shared memory (1280×720×3)
-            self.camera_shm_map.seek(0)
-            raw_bytes = self.camera_shm_map.read(self.camera_shm_size)
-
-            # Convert to numpy array: (1280×720×3) uint8
-            rgb_array = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(720, 1280, 3)
-
-            # Save as PNG
-            camera_dest = self.robot_camera_dir / f"camera_{step:06d}.png"
-            if Image is not None:
-                # Use PIL to save PNG (no dependencies needed)
-                img = Image.fromarray(rgb_array, mode='RGB')
-                img.save(str(camera_dest))
-            else:
-                # Fallback: save as numpy file if PIL not available
-                with open(camera_dest.with_suffix('.npz'), 'wb') as f:
-                    np.save(f, rgb_array)
-
-            return str(camera_dest.resolve())
-        except Exception as e:
-            return None
-
-    def _auto_prune(self):
-        """Automatically prune old files every hour to prevent disk overflow."""
-        patterns = {
-            self.model_video_dir: "output_*.mp4",
-            self.robot_camera_dir: "camera_*.png",
-            self.input_frames_dir: "state_*.txt",
-            self.isaac_frames_dir: "isaac_*.png",
-        }
-
-        total_deleted = 0
-        for directory, pattern in patterns.items():
-            deleted = self._prune_recordings(directory, pattern, self.prune_keep_count)
-            total_deleted += deleted
-
-        if total_deleted > 0:
-            print(f"[RECORDING] Auto-pruned {total_deleted} files (keeping first/last {self.prune_keep_count})", flush=True)
-
-    def _prune_recordings(self, directory: Path, pattern: str, keep_count: int = 10) -> int:
-        """Keep only first & last N files, delete the middle ones (save space).
-
-        Args:
-            directory: Directory to prune
-            pattern: Glob pattern (e.g., "camera_*.png")
-            keep_count: Number to keep at start and end
-
-        Returns:
-            Number of files deleted
-        """
-        if not directory.exists():
+        dirs = sorted(
+            d for d in self.steps_dir.iterdir()
+            if d.is_dir() and d.name.startswith("step_")
+        )
+        total = len(dirs)
+        if total <= KEEP_FIRST + KEEP_LAST:
             return 0
 
-        files = sorted(list(directory.glob(pattern)))
-        if len(files) <= 2 * keep_count:
-            return 0  # Not enough files, keep all
-
-        # Keep first keep_count and last keep_count
-        to_delete = files[keep_count:-keep_count]
+        to_delete = dirs[KEEP_FIRST : total - KEEP_LAST]
         deleted = 0
-        for f in to_delete:
+        for d in to_delete:
             try:
-                f.unlink()
+                shutil.rmtree(d)
                 deleted += 1
             except Exception:
                 pass
 
+        if deleted:
+            remaining = total - deleted
+            print(
+                f"[RECORDING] pruned {deleted} steps "
+                f"(kept first {KEEP_FIRST} + last {KEEP_LAST}, "
+                f"{remaining} remain)",
+                flush=True,
+            )
         return deleted
 
-    def finalize(self):
-        """Print summary, prune old recordings, then finalize."""
-        print(f"\n{'='*80}", flush=True)
-        print(f"[RECORDING] SUMMARY", flush=True)
-        print(f"{'='*80}", flush=True)
+    # ── finalize ──────────────────────────────────────────────────────────────
 
-        # Count files BEFORE pruning
-        input_files = sorted(list(self.input_frames_dir.glob("state_*.txt")))
-        isaac_files = sorted(list(self.isaac_frames_dir.glob("isaac_*.png")))
-        camera_files = sorted(list(self.robot_camera_dir.glob("camera_*.png")))
-        model_files = sorted(list(self.model_video_dir.glob("output_*.mp4")))
+    def finalize(self) -> None:
+        """Итоговый прунинг + сводка."""
+        print(f"\n{'='*70}", flush=True)
+        print(f"[RECORDING] FINAL SUMMARY", flush=True)
+        print(f"{'='*70}", flush=True)
 
-        input_count_before = len(input_files)
-        isaac_count_before = len(isaac_files)
-        camera_count_before = len(camera_files)
-        model_count_before = len(model_files)
+        dirs = sorted(
+            d for d in self.steps_dir.iterdir()
+            if d.is_dir() and d.name.startswith("step_")
+        )
+        total_before = len(dirs)
+        deleted = self._prune_steps()
+        remaining = total_before - deleted
 
-        # Prune: keep first 10 and last 10, delete middle
-        input_deleted = self._prune_recordings(self.input_frames_dir, "state_*.txt", keep_count=10)
-        isaac_deleted = self._prune_recordings(self.isaac_frames_dir, "isaac_*.png", keep_count=10)
-        camera_deleted = self._prune_recordings(self.robot_camera_dir, "camera_*.png", keep_count=10)
-        model_deleted = self._prune_recordings(self.model_video_dir, "output_*.npz", keep_count=10)
+        print(f"[RECORDING] Steps recorded: {total_before}", flush=True)
+        print(f"[RECORDING] Steps pruned:   {deleted}", flush=True)
+        print(f"[RECORDING] Steps kept:     {remaining}", flush=True)
+        if dirs:
+            kept = sorted(
+                d for d in self.steps_dir.iterdir()
+                if d.is_dir() and d.name.startswith("step_")
+            )
+            if kept:
+                print(f"[RECORDING] First step: {kept[0].name}", flush=True)
+                print(f"[RECORDING] Last step:  {kept[-1].name}", flush=True)
 
-        print(f"[RECORDING] Input frames: {input_count_before} recorded, {input_deleted} pruned → kept {input_count_before - input_deleted}", flush=True)
-        print(f"            Location: {self.input_frames_dir.resolve()}", flush=True)
-
-        print(f"[RECORDING] Isaac Sim frames: {isaac_count_before} recorded, {isaac_deleted} pruned → kept {isaac_count_before - isaac_deleted}", flush=True)
-        print(f"            Location: {self.isaac_frames_dir.resolve()}", flush=True)
-
-        print(f"[RECORDING] Robot camera frames: {camera_count_before} recorded, {camera_deleted} pruned → kept {camera_count_before - camera_deleted}", flush=True)
-        print(f"            Location: {self.robot_camera_dir.resolve()}", flush=True)
-
-        print(f"[RECORDING] Model output frames: {model_count_before} recorded, {model_deleted} pruned → kept {model_count_before - model_deleted}", flush=True)
-        print(f"            Location: {self.model_video_dir.resolve()}", flush=True)
-
-        print(f"[RECORDING] Command log (CSV):", flush=True)
-        print(f"            {self.command_log_file.resolve()}", flush=True)
-
-        print(f"[RECORDING] All media in: {self.media_dir.resolve()}", flush=True)
-        print(f"{'='*80}\n", flush=True)
+        print(f"[RECORDING] Steps dir:    {self.steps_dir}", flush=True)
+        print(f"[RECORDING] Command log:  {self.command_log_file}", flush=True)
+        print(f"{'='*70}\n", flush=True)

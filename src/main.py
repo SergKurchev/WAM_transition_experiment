@@ -85,7 +85,6 @@ def main():
     dt = 1.0 / CONTROL_HZ
     loop_count = 0
     last_status_t = time.time()
-    last_cmd = (0.0, 0.0, 0.0)
 
     def graceful_shutdown(signum, frame):
         """Handle Ctrl+C to finalize recording."""
@@ -101,66 +100,55 @@ def main():
 
             state = dds.get_state()
 
-            # Record input state
-            input_frame_path = recorder.save_input_frame(loop_count, state)
+            # ── 1. Записываем ВХОДЫ модели ────────────────────────────────
+            recorder.save_input_frame(loop_count, state)       # state_input.txt
+            recorder.save_robot_camera_frame(loop_count)       # camera_input.png
+            recorder.save_isaac_frame(loop_count)              # isaac_input.png (если есть)
 
+            # ── 2. Inference ──────────────────────────────────────────────
             result = model(state)
-            # Unpack model output: (action_traj, state_traj, video_output)
-            # action_traj shape: (16, 14) - 16 timesteps × 14 DOF (both arms)
             if isinstance(result, tuple) and len(result) >= 3:
                 action_traj, state_traj, video_output = result
             else:
-                print(f"[WAM] ERROR: Model returned invalid result: {result}", flush=True)
+                print(f"[WAM] ERROR: unexpected model result: {result}", flush=True)
                 action_traj, state_traj, video_output = None, None, None
 
-            # Extract first timestep as current action target (14 DOF)
+            # ── 3. Записываем ВЫХОД модели ────────────────────────────────
+            if video_output is not None:
+                recorder.save_model_output(loop_count, video_output)  # model_output.mp4
+
+            # ── 4. Метрики ────────────────────────────────────────────────
             if action_traj is not None and hasattr(action_traj, '__len__') and len(action_traj) > 0:
                 if isinstance(action_traj, torch.Tensor):
-                    action_0 = action_traj[0].cpu().numpy()
+                    action_0      = action_traj[0].cpu().numpy()
+                    action_traj_np = action_traj.cpu().numpy()
                 else:
-                    action_0 = action_traj[0]
+                    action_0      = action_traj[0]
+                    action_traj_np = action_traj
+                action_0_norm  = float((action_0      ** 2).sum() ** 0.5)
+                action_traj_norm = float((action_traj_np ** 2).sum() ** 0.5)
             else:
-                action_0 = np.zeros(14)
+                action_0       = np.zeros(14)
+                action_0_norm  = 0.0
+                action_traj_norm = 0.0
 
-            # Record model video output if available
-            if video_output is not None:
-                recorder.save_model_output(loop_count, video_output)
-
-            # Try to save Isaac Sim frame (if available)
-            isaac_frame_path = recorder.save_isaac_frame(loop_count)
-
-            # Try to save robot camera frame (if available)
-            camera_frame_path = recorder.save_robot_camera_frame(loop_count)
+            # CSV лог
+            recorder.save_command(loop_count, action_0_norm, action_traj_norm)
 
             loop_count += 1
 
+            # ── 5. Периодический status-print ─────────────────────────────
             now = time.time()
             if now - last_status_t >= STATUS_LOG_INTERVAL:
                 age = now - state.timestamp
-
-                # Log 14 DOF joint targets from model
-                if action_traj is not None:
-                    if isinstance(action_traj, torch.Tensor):
-                        action_traj_np = action_traj.cpu().numpy()
-                    else:
-                        action_traj_np = action_traj
-
-                    # Full trajectory norm
-                    action_norm = float((action_traj_np ** 2).sum() ** 0.5)
-                    # Current timestep (action_0) norm
-                    action_0_norm = float((action_0 ** 2).sum() ** 0.5)
-
-                    # Log first 3 joints as sample (right arm shoulder/elbow/wrist)
-                    action_sample = f"{action_0[0]:+.3f} {action_0[1]:+.3f} {action_0[2]:+.3f}"
-                else:
-                    action_norm = 0.0
-                    action_0_norm = 0.0
-                    action_sample = "-.--- -.--- -.---"
-
+                sample = f"{action_0[0]:+.3f} {action_0[1]:+.3f} {action_0[2]:+.3f}"
                 print(
-                    f"[WAM] loop={loop_count}  action_0[0:3]=[{action_sample}]"
-                    f"  norm={action_0_norm:.3f}  traj_norm={action_norm:.3f}"
-                    f"  state_age={age*1000:.0f}ms  q0={state.q[0]:.3f}",
+                    f"[WAM] loop={loop_count}"
+                    f"  action_0[0:3]=[{sample}]"
+                    f"  norm={action_0_norm:.3f}"
+                    f"  traj_norm={action_traj_norm:.3f}"
+                    f"  state_age={age*1000:.0f}ms"
+                    f"  q0={state.q[0]:.3f}",
                     flush=True,
                 )
                 last_status_t = now
