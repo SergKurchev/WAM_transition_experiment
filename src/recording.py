@@ -146,35 +146,76 @@ class MediaRecorder:
             self.last_prune_time = current_time
 
     def save_model_output(self, step: int, video_output) -> str | None:
-        """Save model-generated video prediction.
+        """Save model-generated video as MP4.
 
         Args:
             step: Control loop step number
-            video_output: Tensor or array from model (video frames, latent codes, etc.)
+            video_output: Tensor or array from model. Expected shape from
+                LatentVisualDiffusion: (B, C, T, H, W) in [-1, 1] range.
 
         Returns:
-            Full path to saved file, or None if save failed
+            Full path to saved MP4, or None if save failed
         """
         if video_output is None:
             return None
 
         try:
+            import cv2 as _cv2
             import torch
 
-            # Convert to numpy if torch tensor
+            # --- 1. Convert to float32 numpy ---
             if isinstance(video_output, torch.Tensor):
-                video_data = video_output.detach().cpu().numpy()
+                arr = video_output.detach().cpu().float().numpy()
             else:
-                video_data = np.asarray(video_output)
+                arr = np.array(video_output, dtype=np.float32)
 
-            # Save as compressed numpy array (.npz)
-            output_file = self.model_video_dir / f"output_{step:06d}.npz"
-            with open(output_file, 'wb') as f:
-                np.save(f, video_data, allow_pickle=False)
+            # --- 2. Canonicalize to (T, H, W, C) ---
+            if arr.ndim == 5:
+                # (B, C, T, H, W) → take batch 0 → (C, T, H, W)
+                arr = arr[0]
+            if arr.ndim == 4:
+                # Detect (C, T, H, W) vs (T, H, W, C)
+                if arr.shape[0] in (1, 3, 4) and arr.shape[0] < arr.shape[1]:
+                    # (C, T, H, W) → (T, H, W, C)
+                    arr = arr.transpose(1, 2, 3, 0)
+                # else already (T, H, W, C)
 
+            # --- 3. Normalize to uint8 [0, 255] ---
+            if arr.min() >= -1.5 and arr.max() <= 1.5:
+                # [-1, 1] → [0, 255]
+                arr = ((arr + 1.0) / 2.0 * 255.0)
+            elif arr.max() <= 1.0:
+                arr = arr * 255.0
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+            # Make contiguous (avoids negative stride errors from flip ops)
+            arr = np.ascontiguousarray(arr)
+
+            # --- 4. Write with OpenCV (BGR order) ---
+            output_file = self.model_video_dir / f"output_{step:06d}.mp4"
+            T, H, W, C = arr.shape
+            fourcc = _cv2.VideoWriter_fourcc(*'mp4v')
+            writer = _cv2.VideoWriter(str(output_file), fourcc, 10.0, (W, H))
+
+            for frame in arr:
+                if C == 3:
+                    # RGB → BGR for OpenCV
+                    bgr = np.ascontiguousarray(frame[:, :, ::-1])
+                elif C == 1:
+                    bgr = _cv2.cvtColor(frame, _cv2.COLOR_GRAY2BGR)
+                else:
+                    bgr = frame[:, :, :3]
+                    bgr = np.ascontiguousarray(bgr[:, :, ::-1])
+                writer.write(bgr)
+
+            writer.release()
+            print(f"[RECORDING] Saved video: {output_file}", flush=True)
             return str(output_file.resolve())
+
         except Exception as e:
-            print(f"[RECORDING] Failed to save model output: {e}", flush=True)
+            print(f"[RECORDING] Failed to save video: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return None
 
     def save_isaac_frame(self, step: int):
@@ -241,7 +282,7 @@ class MediaRecorder:
     def _auto_prune(self):
         """Automatically prune old files every hour to prevent disk overflow."""
         patterns = {
-            self.model_video_dir: "output_*.npz",
+            self.model_video_dir: "output_*.mp4",
             self.robot_camera_dir: "camera_*.png",
             self.input_frames_dir: "state_*.txt",
             self.isaac_frames_dir: "isaac_*.png",
@@ -295,7 +336,7 @@ class MediaRecorder:
         input_files = sorted(list(self.input_frames_dir.glob("state_*.txt")))
         isaac_files = sorted(list(self.isaac_frames_dir.glob("isaac_*.png")))
         camera_files = sorted(list(self.robot_camera_dir.glob("camera_*.png")))
-        model_files = sorted(list(self.model_video_dir.glob("output_*.npz")))
+        model_files = sorted(list(self.model_video_dir.glob("output_*.mp4")))
 
         input_count_before = len(input_files)
         isaac_count_before = len(isaac_files)

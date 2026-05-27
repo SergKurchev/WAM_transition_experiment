@@ -30,6 +30,7 @@ RUN mkdir -p /etc/apt/apt.conf.d && \
         git curl wget \
         libssl-dev \
         libglib2.0-0 libsm6 libxext6 libxrender1 \
+        libgl1-mesa-glx \
         iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -65,17 +66,39 @@ RUN pip install --no-cache-dir \
 # For now, install OpenCV and other deps; ROS2 packages come from system or bind-mounts.
 RUN pip install --no-cache-dir \
     numpy \
-    transformers \
+    "transformers==4.40.1" \
     einops \
     scipy \
     pyyaml \
     tqdm \
     opencv-python \
     Pillow \
-    "cyclonedds==0.10.2"
+    "cyclonedds==0.10.2" \
+    omegaconf \
+    "diffusers==0.30.2" \
+    accelerate \
+    xformers
+
+# Runtime deps for unifolm_wma (loaded via PYTHONPATH from bind-mount at /workspace/unifolm/src).
+# unifolm_wma is NOT pip-installed — source is bind-mounted from repos/unifolm at runtime.
+# Covers inference path; skips gradio / tensorflow / datasets (training-only).
+# NOTE: unifolm pyproject.toml specifies torch==2.3.1; we use 2.7.0 for CUDA 12.2 compat.
+#       If torch API breaks arise, downgrade torch/torchvision in the block above.
+RUN pip install --no-cache-dir \
+    "pytorch-lightning==1.9.3" \
+    "open-clip-torch==2.22.0" \
+    "timm==0.9.10" \
+    "kornia==0.7.3" \
+    "decord==0.6.0" \
+    "moviepy==1.0.3" \
+    "scikit-learn==1.5.1" \
+    "termcolor==2.4.0" \
+    "fairscale==0.4.13" \
+    "draccus==0.11.5"
 
 # /workspace/wam      — your model code (bind-mounted, hot-reload)
 # /workspace/unitree_sdk2py_src — DDS SDK (bind-mounted read-only)
+# /workspace/unifolm — unifolm_wma repo (bind-mounted from repos/unifolm)
 WORKDIR /workspace/wam
 
 CMD ["python", "main.py"]

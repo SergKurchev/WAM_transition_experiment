@@ -2,8 +2,8 @@
 
 Runs a control loop:
   1. Read robot state from Isaac Sim via rt/lowstate (DDS).
-  2. Run WAM model inference → velocity command.
-  3. Publish rt/run_command/cmd → GEAR-SONIC drives the robot.
+  2. Run WAM model inference → trajectory predictions (16, 14).
+  3. Record model outputs: action trajectories, state predictions, video frames.
 
 To swap models set WAM_MODEL env var: unifolm | eva
 """
@@ -11,9 +11,14 @@ To swap models set WAM_MODEL env var: unifolm | eva
 import os
 import time
 import signal
+import numpy as np
+import torch
 
 from dds_interface import DDSInterface
 from recording import MediaRecorder
+
+
+# unifolm_wma is installed during Docker build (cloned from GitHub and pip install -e)
 
 STATUS_LOG_INTERVAL = 5.0  # seconds between periodic status lines
 
@@ -21,7 +26,12 @@ STATUS_LOG_INTERVAL = 5.0  # seconds between periodic status lines
 # ── model registry ────────────────────────────────────────────────────────────
 
 def load_model(name: str, checkpoint: str | None, prompt: str | None = None):
-    """Return an inference callable: fn(state) -> (vx, vy, wz)."""
+    """Return an inference callable: fn(state) -> (action_traj, state_traj, video_output).
+
+    action_traj: (16, 14) tensor - 16 timesteps × 14 DOF (both arms)
+    state_traj: (16, 14) tensor - world model state predictions
+    video_output: optional video frames from diffusion model
+    """
     if name == "unifolm":
         from models.unifolm import UnifoLMModel
         return UnifoLMModel(checkpoint, prompt=prompt)
@@ -95,14 +105,22 @@ def main():
             input_frame_path = recorder.save_input_frame(loop_count, state)
 
             result = model(state)
-            vx, vy, wz, body_height = result[0], result[1], result[2], result[3]
-            video_output = result[4] if len(result) > 4 else None
+            # Unpack model output: (action_traj, state_traj, video_output)
+            # action_traj shape: (16, 14) - 16 timesteps × 14 DOF (both arms)
+            if isinstance(result, tuple) and len(result) >= 3:
+                action_traj, state_traj, video_output = result
+            else:
+                print(f"[WAM] ERROR: Model returned invalid result: {result}", flush=True)
+                action_traj, state_traj, video_output = None, None, None
 
-            dds.send_command(vx, vy, wz, body_height=body_height)
-            last_cmd = (vx, vy, wz)
-
-            # Record command output
-            recorder.save_command(loop_count, vx, vy, wz, body_height)
+            # Extract first timestep as current action target (14 DOF)
+            if action_traj is not None and hasattr(action_traj, '__len__') and len(action_traj) > 0:
+                if isinstance(action_traj, torch.Tensor):
+                    action_0 = action_traj[0].cpu().numpy()
+                else:
+                    action_0 = action_traj[0]
+            else:
+                action_0 = np.zeros(14)
 
             # Record model video output if available
             if video_output is not None:
@@ -119,8 +137,29 @@ def main():
             now = time.time()
             if now - last_status_t >= STATUS_LOG_INTERVAL:
                 age = now - state.timestamp
+
+                # Log 14 DOF joint targets from model
+                if action_traj is not None:
+                    if isinstance(action_traj, torch.Tensor):
+                        action_traj_np = action_traj.cpu().numpy()
+                    else:
+                        action_traj_np = action_traj
+
+                    # Full trajectory norm
+                    action_norm = float((action_traj_np ** 2).sum() ** 0.5)
+                    # Current timestep (action_0) norm
+                    action_0_norm = float((action_0 ** 2).sum() ** 0.5)
+
+                    # Log first 3 joints as sample (right arm shoulder/elbow/wrist)
+                    action_sample = f"{action_0[0]:+.3f} {action_0[1]:+.3f} {action_0[2]:+.3f}"
+                else:
+                    action_norm = 0.0
+                    action_0_norm = 0.0
+                    action_sample = "-.--- -.--- -.---"
+
                 print(
-                    f"[WAM] loop={loop_count}  cmd=[vx={last_cmd[0]:.2f} vy={last_cmd[1]:.2f} wz={last_cmd[2]:.2f}]"
+                    f"[WAM] loop={loop_count}  action_0[0:3]=[{action_sample}]"
+                    f"  norm={action_0_norm:.3f}  traj_norm={action_norm:.3f}"
                     f"  state_age={age*1000:.0f}ms  q0={state.q[0]:.3f}",
                     flush=True,
                 )

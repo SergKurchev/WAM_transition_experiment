@@ -1,207 +1,268 @@
-# UnifoLM-WMA-0 Deployment Guide
+# UnifoLM-WMA-0: Deployment & Operations Guide
 
-Integrate and deploy UnifoLM-WMA-0 world action model for G1 arm control.
+Руководство по запуску реального DDIM inference UnifoLM-WMA-0 на G1.
 
-## Quick Start
+**Статус:** ✅ Работает на GPU-01 с 27 мая 2026.
 
-### 1. Test Locally (no server needed)
+---
 
+## Предварительные условия
+
+На сервере должны быть:
+
+```
+/root/skurchev/workspace/
+├── wam-stack/
+│   ├── checkpoints/unifolm_wma_dual.ckpt   ← ≈16 GB чекпойнт
+│   └── repos/unifolm/                       ← unifolm repo с патчем
+└── mws-dimos/                               ← feat/real-transfer ветка
+```
+
+Проверить:
 ```bash
-cd wam-stack
-python scripts/test_unifolm.py
-```
+ls -lh /root/skurchev/workspace/wam-stack/checkpoints/unifolm_wma_dual.ckpt
+# Должно быть ≈16G
 
-Expected output:
-```
-[TEST 1] Initialize UnifoLM in test mode (arm clapping demo)
-[PASS] Model initialized successfully
-  Device: cpu
-  Mode: TEST (arm clapping demo)
-
-[TEST 2] Create mock robot state (G1 29-DOF)
-[PASS] Mock state created
-
-[TEST 3] Run 10 seconds of inference (100 steps at 10 Hz)
-...
-[PASS] All tests passed!
-```
-
-### 2. Deploy to Server (with test mode)
-
-```bash
-# Terminal 1: Deploy stack with default stub model
-cd wam-stack
-bash scripts/deploy.sh
-
-# Or: Deploy with UnifoLM in test mode (arm clapping demo)
-WAM_MODEL=unifolm bash scripts/deploy.sh
-
-# Or: With --build flag (if dependencies changed)
-WAM_MODEL=unifolm bash scripts/deploy.sh --build
-```
-
-### 3. Monitor on Server
-
-```bash
-# Terminal 2: Watch WAM logs
-ssh -p 2221 root@176.109.83.84
-docker logs -f wam-inference
-
-# Look for: [UnifoLM demo] step=... (arm clapping output)
-```
-
-### 4. Visual Monitoring
-
-```bash
-# Terminal 3 (local machine): Port forwarding
-ssh -N -L 6081:localhost:6080 -p 2221 x32-techgov-GPU-01
-
-# Then open browser: http://localhost:6081
-# You should see G1 robot in Isaac Sim
+python3 -c "import sys; sys.path.insert(0, '/root/skurchev/workspace/wam-stack/repos/unifolm/src'); \
+  from unifolm_wma.models.ddpms import LatentVisualDiffusion; print('OK')"
+# Должно вывести: OK
 ```
 
 ---
 
-## Load Real Model
-
-Once you have a UnifoLM checkpoint, you can load it instead of test mode:
-
-### Option A: From Local Checkpoint
+## Запуск
 
 ```bash
-# Copy checkpoint to server
-scp -P 2221 /path/to/unifolm_checkpoint.pt root@176.109.83.84:/root/skurchev/workspace/wam-stack/checkpoints/
-
-# Deploy with checkpoint
-WAM_MODEL=unifolm WAM_CHECKPOINT=/workspace/wam/checkpoints/unifolm_checkpoint.pt bash scripts/deploy.sh --build
+cd /root/skurchev/workspace/wam-stack
+docker compose up -d
 ```
 
-### Option B: From HuggingFace Hub
+Полный старт занимает **~90 секунд** (Isaac Sim grpc инициализация + загрузка модели).
+
+### Прогресс загрузки (что искать в логах)
 
 ```bash
-# Deploy with HuggingFace model ID
-WAM_MODEL=unifolm WAM_CHECKPOINT=org/unifolm-wma-0 bash scripts/deploy.sh --build
+docker logs wam-inference -f
 ```
 
-The model will be auto-downloaded on first run.
+| Что видим | Что происходит |
+|-----------|----------------|
+| `[UnifoLM] ✓ Loaded G1 pack camera normalization stats` | stats загружены |
+| `[UnifoLM] ✓ Camera SHM: /run/mws/camera.rgb` | D435i камера доступна |
+| `AE working on z of shape (1, 4, 32, 32)` | AutoEncoder инициализируется |
+| `[UnifoLM] Checkpoint loaded successfully` | чекпойнт загружен |
+| `[WAM] rt/lowstate received` | DDS соединение установлено |
+| `[WAM] loop=2  action_0[0:3]=...` | DDIM inference работает |
 
 ---
 
-## Model Architecture
+## Что делает модель
 
-### Input
+Каждую итерацию (10 Hz) модель:
 
-- **Type:** RobotState dataclass
-- **q:** 29-DOF joint positions (radians)
-- **dq:** 29-DOF joint velocities (rad/s)
-- **tau:** 29-DOF joint torques (N·m)
+1. **Читает** 2 последних кадра D435i (1280×720 RGB из SHM)
+2. **Нормализует** стейт робота (14 DOF → 16, min-max → [-1, 1])
+3. **Запускает DDIM** (16 шагов, ~2-4 сек на GPU)
+4. **Декодирует** латентное видео → пиксели
+5. **Денормализует** действия → радианы
+6. **Записывает** MP4, PNG, TXT
 
-### Output
+Выходной лог:
+```
+[WAM] loop=5  action_0[0:3]=[-0.42 +0.42 -0.17]  norm=1.18  traj_norm=4.96  state_age=16ms  q0=-0.275
+```
 
-- **vx, vy, wz:** Body-frame velocity commands (m/s, m/s, rad/s)
-  - vx: forward/back velocity
-  - vy: left/right velocity
-  - wz: yaw rate (rotation)
-
-### Processing
-
-1. **Input prep:** Concatenate q + dq → 58D observation
-2. **Model forward:** 58D → 3D velocity command
-3. **Clipping:** Clamp to [-1, 1] for safety
+- `action_0[0:3]` — первые 3 DOF (shoulder pitch/roll/yaw) в **радианах**
+- `norm` — L2-норма первого шага (типично 0.8–1.5 рад)
+- `traj_norm` — L2-норма всей 16-шаговой траектории (типично 4–6)
 
 ---
 
-## Test Mode: Arm Clapping Demo
+## Нормализация
 
-When `WAM_CHECKPOINT` is not set, the model runs in **test mode** with heuristic arm clapping:
+### Стейт (вход в модель)
 
 ```python
-# Oscillating pattern (0.5 Hz clapping)
-phase = step / 10.0  # At 10 Hz control loop
-if phase < 0.25:     # Arms opening
-    arm_effort = phase / 0.25
-elif phase < 0.5:    # Arms closing (clap!)
-    arm_effort = 1.0 - (phase - 0.25) / 0.25
-# ... continues
+# Формула: (x - min) / (max - min + 1e-8) * 2 - 1
+# Источник: unitree_g1_pack_camera/meta_data/stats.safetensors
+
+state_min = [-1.6514, -0.1329, -1.3105, -1.0467, -1.9663, -1.4105,
+             -1.6218, -1.4388, -1.7361, -0.7223, -1.0379, -0.5346,
+             -1.0349, -0.6417, -0.0307,  0.0230]
+
+state_max = [ 0.9437,  1.6497,  0.9905,  1.3529,  1.4207,  1.6086,
+              1.1852,  0.6558,  0.1548,  1.4194,  1.3507,  1.3449,
+              1.6028,  1.6194,  5.4722,  5.4958]
 ```
 
-Output: `[vx=0.0, vy=0.0, wz=0.0]` (stand in place, let GEAR-SONIC handle arm motion)
+Dims 0-13 — 14 DOF G1 arms. Dims 14-15 — gripper (нули, т.к. G1 без gripper в этой конфигурации).
+
+### Действия (выход из модели)
+
+```python
+# Формула обратная: (norm + 1) / 2 * (max - min) + min
+
+action_min = [-1.6897, -0.3179, -1.3181, -1.0472, -1.9722, -1.4171,
+              -1.6144, -1.4506, -1.7541, -0.7332, -1.0460, -0.5455,
+              -1.0137, -0.6167,  0.0000,  0.0000]
+
+action_max = [ 0.9541,  1.6616,  0.9965,  1.3657,  1.4339,  1.6144,
+               1.1964,  0.6619,  0.1525,  1.4254,  1.3613,  1.3555,
+               1.6144,  1.6144,  5.4000,  5.4000]
+```
+
+---
+
+## Камера
+
+Приоритет источников:
+
+```
+1. /run/mws/camera.rgb          ← D435i head cam (PREFERRED)
+   Формат: raw RGB bytes, 1280×720×3, unsigned int8
+   Перспектива: совпадает с G1_Dex1_MountCameraRedGripper training data
+
+2. /tmp/isaac_frame.png         ← Isaac Sim editor view (fallback)
+   Проблема: top-down view, domain mismatch с training data
+   → видео выход модели тёмное/мутное
+
+3. Последний закешированный кадр
+4. Чёрный кадр (zeros)
+```
+
+Проверить какой источник используется:
+```bash
+docker logs wam-inference | grep "Camera SHM"
+# Если видишь ✓ — SHM доступен (нормально)
+# Если видишь "not found" — используется fallback
+```
+
+---
+
+## Медиа-файлы
+
+### Расположение
+
+```
+/root/skurchev/workspace/wam-stack/media/
+├── model_output/output_XXXXXX.mp4   # Генерируемое видео (16 кадров, 10 FPS)
+├── robot_camera/camera_XXXXXX.png   # D435i кадры (1280×720)
+├── input_frames/state_XXXXXX.txt    # Стейт (q, dq, tau текстом)
+└── command_logs/commands_*.csv      # Лог шагов
+```
+
+### Скачать на локальную машину
+
+```bash
+# На локальной машине
+scp -r -P 2221 root@176.109.83.84:/root/skurchev/workspace/wam-stack/media/model_output/ ./
+scp -r -P 2221 root@176.109.83.84:/root/skurchev/workspace/wam-stack/media/robot_camera/ ./
+```
+
+### Очистка
+
+```bash
+find /root/skurchev/workspace/wam-stack/media -type f -delete
+```
+
+---
+
+## Конфигурация модели
+
+Файл: `src/config_model.yaml`
+
+Критические параметры (не менять без понимания):
+
+```yaml
+n_obs_steps_imagen: 2       # размер истории (deque maxlen)
+n_obs_steps_acting: 2       # история для action head
+agent_state_dim: 16         # должно совпадать с чекпойнтом
+agent_action_dim: 16        # должно совпадать с чекпойнтом
+decision_making_only: True  # action head активен
+temporal_length: 16         # горизонт (DDIM T)
+default_fs: 10              # fallback FPS (мы используем 15 в inference)
+```
+
+DDIM параметры (в `unifolm.py`):
+```python
+ddim_steps = 16   # шагов семплирования
+ddim_eta   = 1.0  # стохастичность (1.0 = DDIM-stochastic)
+MODEL_FPS  = 15   # FPS conditioning (30 / frame_stride=2)
+```
+
+---
+
+## Изменение промпта
+
+```bash
+# На сервере или через env var в compose.yml
+WAM_PROMPT="robot arm picks up red block" docker compose restart wam
+```
+
+Или в `compose.yml`:
+```yaml
+environment:
+  - WAM_PROMPT=robot arm picks up red block
+```
 
 ---
 
 ## Troubleshooting
 
-### "WAM_CHECKPOINT must be set for UnifoLM"
+### "Missing keys" при загрузке чекпойнта
 
-**Cause:** Model not in test mode and no checkpoint provided.
+Норма — модель загружается с `strict=False`. Несколько missing/unexpected ключей не критично.  
+Проблема есть если inference возвращает нули (`norm=0.000 traj_norm=0.000`).
 
-**Fix:**
-```bash
-# Either: Use test mode (no checkpoint)
-WAM_MODEL=unifolm bash scripts/deploy.sh
+### `assert 1 > 2` ошибка
 
-# Or: Provide a checkpoint
-WAM_CHECKPOINT=/path/to/checkpoint.pt WAM_MODEL=unifolm bash scripts/deploy.sh
+```
+AssertionError: >>> ERROR: should setup xformers
 ```
 
-### "observation dimension (0) ≠ 994" (GEAR-SONIC error)
-
-**Cause:** sim-ros2-bridge not running or observations not flowing.
-
-**Fix:**
+**Причина:** Патч attention.py не применён.  
+**Фикс на сервере:**
 ```bash
-# Check bridge status
-docker compose ps | grep ros2-bridge
-docker logs wam-ros2-bridge | tail -20
-
-# Restart if needed
-docker compose restart wam-ros2-bridge
+sed -i '/assert 1 > 2/d' /root/skurchev/workspace/wam-stack/repos/unifolm/src/unifolm_wma/modules/attention.py
+docker restart wam-inference
 ```
 
-### Robot not moving / stuck at startup
+### Inference слишком медленный
 
-**Cause:** GEAR-SONIC initializing (normal for 30–60s).
+DDIM 16 шагов на GPU занимает ~2-4 сек. Control loop 10 Hz, то есть одна итерация inference занимает больше 1 control step — это нормально, inference запускается асинхронно.
 
-**Check:**
+Если inference вообще не запускается (только zeros в логах), проверить:
 ```bash
-docker logs wam-gear-sonic | grep -E "Running|ready|initialized"
+docker logs wam-inference | grep -E "DDIM|Inference failed|FATAL"
 ```
 
-### Slow inference / exceeds control budget
+### Видео чёрное
 
-**Check timing:**
+1. Проверить источник камеры (SHM vs fallback)
+2. Проверить нормализацию — если stats не загрузились, стейт подаётся ненормализованным
+3. Domain mismatch с training data — уменьшится после fine-tuning на Isaac Sim данных
+
+### Нет SHM камеры
+
 ```bash
-docker logs wam-inference | grep inference_ms
+# На сервере: проверить что файл есть
+ls -la /run/mws/camera.rgb
+# Если нет — Isaac Sim или ros2-bridge не писал в SHM
 
-# Should see < 10ms for test mode, < 50ms for real model
+# Проверить isaac-sim контейнер
+docker logs wam-isaac-sim | tail -30
 ```
-
-If exceeding 100ms (10 Hz budget), optimize or use GPU.
 
 ---
 
-## Files Modified
+## Следующий шаг: публикация действий
 
-| File | Change |
-|------|--------|
-| `src/models/unifolm.py` | Full implementation (model loading, inference, test mode) |
-| `scripts/test_unifolm.py` | New: Local validation script (no server needed) |
+Сейчас `action_traj` только логируется. Чтобы отправить роботу, нужно добавить в `main.py`:
 
----
+```python
+# После получения action_traj из модели
+action_0 = action_traj[0].numpy()  # [14] DOF, radians
+dds.publish_lowcmd(action_0)       # нужно реализовать в dds_interface.py
+```
 
-## Next Steps
-
-1. **[Now]** Test locally: `python scripts/test_unifolm.py`
-2. **[Day 1]** Deploy to server with test mode, verify arm clapping in Isaac Sim
-3. **[Week 1]** Collect dataset (~400 samples of G1 arm clapping)
-4. **[Week 2]** Fine-tune UnifoLM on G1 arm data
-5. **[Week 3]** Load fine-tuned checkpoint and test transfer to UBTech
-
----
-
-## References
-
-- **UnifoLM Repo:** https://github.com/unitreerobotics/unifolm-world-model-action
-- **CLAUDE.md:** Architecture details (why sim-ros2-bridge is critical)
-- **README.md:** Quick reference
-- **SETUP.md:** Troubleshooting & dependency versions
+⚠️ Это требует понимания как GEAR-SONIC принимает команды по `rt/lowcmd`.

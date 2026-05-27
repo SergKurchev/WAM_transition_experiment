@@ -1,17 +1,4 @@
-# wam-stack: WAM agent + mws-dimos infrastructure (Isaac Sim, GEAR-SONIC, ROS2 Bridge)
-#
-# Requires: mws-dimos cloned to /root/skurchev/workspace/mws-dimos (feat/real-transfer branch)
-#
-# Start:
-#   docker compose up -d
-#
-# Visual (local machine):
-#   ssh -N -L 6081:localhost:6080 -p 2221 x32-techgov-GPU-01
-#   http://localhost:6081
-
 services:
-
-  # Isaac Sim — physics simulator + rt/lowstate publisher (pre-built image from mws-dimos)
   sim-isaac:
     image: mws-dimos/sim-isaac:unitree-lab-5.1
     container_name: wam-isaac-sim
@@ -48,75 +35,6 @@ services:
       retries: 60
       start_period: 120s
 
-  # GEAR-SONIC — whole-body control policy (pre-built image from mws-dimos)
-  sim-gear-sonic:
-    image: mws-sim-gear-sonic-policy:latest
-    container_name: wam-gear-sonic
-    network_mode: host
-    volumes:
-      - /root/skurchev/workspace/mws-dimos/modules/gwbc/gear_sonic_deploy:/opt/gear_sonic_deploy:rw
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
-    command:
-      - /usr/local/bin/g1_deploy_onnx_ref
-      - lo
-      - /opt/gear_sonic_deploy/policy/release/model_decoder.onnx
-      - /opt/gear_sonic_deploy/reference/example/
-      - --obs-config
-      - /opt/gear_sonic_deploy/policy/release/observation_config.yaml
-      - --encoder-file
-      - /opt/gear_sonic_deploy/policy/release/model_encoder.onnx
-      - --planner-file
-      - /opt/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx
-      - --input-type
-      - dds
-      - --output-type
-      - all
-      - --disable-crc-check
-    runtime: nvidia
-    privileged: true
-    shm_size: '2gb'
-    stdin_open: true
-    tty: true
-    restart: on-failure
-    healthcheck:
-      test: ["CMD", "test", "-f", "/tmp/gear-sonic-ready"]
-      interval: 5s
-      timeout: 2s
-      retries: 12
-      start_period: 180s
-    depends_on:
-      sim-isaac:
-        condition: service_healthy
-
-  # ROS2 Bridge — transforms isaac rt/lowstate → 994D observations for GEAR-SONIC
-  sim-ros2-bridge:
-    image: mws-sim-ros2-bridge:latest
-    container_name: wam-ros2-bridge
-    network_mode: host
-    privileged: true
-    volumes:
-      - sim_bridge_shm:/run/mws
-      - /root/skurchev/workspace/mws-dimos/deploy/sim/ros2/config.toml:/workspace/mws-dimos/deploy/sim/ros2/config.toml:ro
-    environment:
-      - ROS_DOMAIN_ID=42
-      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-      - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
-      - DIMOS_SIM_CONFIG_FILE=/workspace/mws-dimos/deploy/sim/ros2/config.toml
-    healthcheck:
-      test: ["CMD", "test", "-f", "/tmp/mws_sim_ros2_bridge_ready"]
-      interval: 2s
-      timeout: 1s
-      retries: 10
-      start_period: 10s
-    depends_on:
-      sim-isaac:
-        condition: service_healthy
-      sim-gear-sonic:
-        condition: service_healthy
-
-  # WAM — World Action Model inference agent (built from wam-stack)
   wam:
     build:
       context: .
@@ -128,12 +46,13 @@ services:
       - /root/skurchev/workspace/wam-stack/src:/workspace/wam:rw
       - /root/skurchev/workspace/wam-stack/checkpoints:/workspace/wam/checkpoints:ro
       - /root/skurchev/workspace/wam-stack/media:/workspace/wam/media:rw
+      - /root/skurchev/workspace/wam-stack/repos/unifolm:/workspace/unifolm:ro
       - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
       - sim_bridge_shm:/run/mws
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
-      - PYTHONPATH=/workspace/wam:/workspace/unitree_sdk2py_src
+      - PYTHONPATH=/workspace/wam:/workspace/unitree_sdk2py_src:/workspace/unifolm/src
       - PYTHONUNBUFFERED=1
       - WAM_MODEL=${WAM_MODEL:-unifolm}
       - WAM_CHECKPOINT=${WAM_CHECKPOINT:-/workspace/wam/checkpoints/unifolm_wma_dual.ckpt}
@@ -147,8 +66,6 @@ services:
     command: ["python", "/workspace/wam/main.py"]
     depends_on:
       sim-isaac:
-        condition: service_healthy
-      sim-ros2-bridge:
         condition: service_healthy
 
 volumes:

@@ -1,16 +1,8 @@
-"""UnifoLM-WMA-0 adapter.
+"""UnifoLM-WMA-0 inference with real model loading and DDIM sampling.
 
-Repo: https://github.com/unitreerobotics/unifolm-world-model-action
-
-Loads UnifoLM-WMA-0 world action model for G1 robot control.
-Input: Robot state (29-DOF joint positions/velocities).
-Output: Velocity commands (vx, vy, wz, body_height) for GEAR-SONIC WBC.
-
-Supports:
-  - Loading from HuggingFace Hub (hf_hub_id)
-  - Loading from local checkpoint (file path)
-  - Inference with GPU (if available)
-  - Test mode: arm extending forward demo (no checkpoint needed)
+Loads actual UnifoLM model from checkpoint with OmegaConf config.
+Implements proper image-guided synthesis with text conditioning.
+Outputs trajectory predictions and video frames.
 """
 
 import os
@@ -18,399 +10,716 @@ import sys
 import time
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
+from collections import deque
+from collections import OrderedDict
 
 import numpy as np
 import torch
-import torch.nn as nn
+import cv2
+
+from omegaconf import OmegaConf
+from einops import rearrange, repeat
 
 from dds_interface import RobotState
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+# Model input dimensions (from config_model.yaml)
+MODEL_INPUT_H = 320       # image height expected by model
+MODEL_INPUT_W = 512       # image width expected by model
+MODEL_STATE_DIM = 16      # universal state dim (model always uses 16)
+MODEL_ACTION_DIM = 16     # universal action dim (model always uses 16)
+MODEL_CHANNELS = 4        # latent channels (from config: channels: 4)
+MODEL_HORIZON = 16        # temporal length (from config: temporal_length: 16)
+MODEL_FPS = 15            # fps for sampling: 30 / frame_stride=2 (from official run_real_eval_server.sh)
+                          # default_fs=10 in wma_config is just a fallback; official script uses frame_stride=2 → fps=15
+LATENT_H = MODEL_INPUT_H // 8   # = 40
+LATENT_W = MODEL_INPUT_W // 8   # = 64
+NOISE_SHAPE = [1, MODEL_CHANNELS, MODEL_HORIZON, LATENT_H, LATENT_W]
 
-class UnifoLMModel:
-    """World Action Model for unified robot control.
+# Normalization stats: G1 Pack Camera dataset (unitree_g1_pack_camera)
+# Bundled in the unifolm repo examples directory, always available in container.
+G1_PACK_CAMERA_STATS_PATH = (
+    "/workspace/unifolm/examples/world_model_interaction_prompts"
+    "/transitions/unitree_g1_pack_camera/meta_data/stats.safetensors"
+)
 
-    Generates velocity commands from robot state observations.
+# Robot head camera SHM — D435i mounted on G1, looking at workspace.
+# Same perspective as training data (G1_Dex1_MountCameraRedGripper_Dataset).
+# Format: raw RGB bytes 1280×720, written by Isaac Sim bridge.
+CAMERA_SHM_PATH = "/run/mws/camera.rgb"
+CAMERA_SHM_W, CAMERA_SHM_H = 1280, 720
+CAMERA_SHM_SIZE = CAMERA_SHM_W * CAMERA_SHM_H * 3  # bytes
+
+
+def instantiate_from_config(config):
+    """Instantiate a module from OmegaConf config or plain dict.
+
+    Mirrors unifolm_wma.utils.utils.instantiate_from_config.
+    Handles OmegaConf DictConfig WITHOUT converting to plain dict —
+    the nested sub-configs must stay as DictConfig so model code can
+    use attribute access (config.params, config.target etc.).
     """
+    try:
+        from omegaconf import DictConfig
+        if isinstance(config, DictConfig):
+            # DictConfig supports dict-like .get() and **unpacking.
+            # Keep nested values as OmegaConf objects for the model code.
+            target = config.get("target", None) or config.get("_target_", None)
+            if target is None:
+                raise ValueError(f"Missing 'target' in config: {config}")
+            params = config.get("params", {})
+            if isinstance(target, str):
+                module_path, class_name = target.rsplit(".", 1)
+                mod = __import__(module_path, fromlist=[class_name])
+                cls = getattr(mod, class_name)
+            else:
+                cls = target
+            return cls(**params)
+    except ImportError:
+        pass
 
-    def __init__(self, checkpoint: str | None, test_mode: bool | None = None, prompt: str | None = None):
-        """
-        Initialize UnifoLM model.
+    # Plain-dict path (fallback)
+    if not isinstance(config, dict):
+        if isinstance(config, str):
+            return config
+        raise ValueError(f"Cannot instantiate config: {config}")
 
-        Args:
-            checkpoint: Path to local checkpoint or HuggingFace Hub ID (e.g., "org/model-name")
-                       If None, automatically uses test_mode=True.
-            test_mode: If True, use heuristic demo (ignore checkpoint).
-                      If None (default), auto-detect based on checkpoint (True if None, False if set).
-            prompt: Task prompt (e.g., "pick and place green cube in white basket").
-                   Used to condition model output if vision system available.
-        """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = None
-        self.input_dim = 29  # G1 has 29 DOF (q + dq interleaved)
-        self.output_dim = 3  # (vx, vy, wz)
-        self.step_count = 0
-        self.prompt = prompt or "default navigation"
+    target = config.get("target") or config.get("_target_")
+    if not target:
+        raise ValueError(f"Missing 'target' in config: {config}")
 
-        print(f"[UnifoLM] Task prompt: {self.prompt}", flush=True)
+    params = config.get("params", {})
 
-        # Auto-detect test_mode if not explicitly set
-        if test_mode is None:
-            test_mode = (checkpoint is None)
+    if isinstance(target, str):
+        module_path, class_name = target.rsplit(".", 1)
+        mod = __import__(module_path, fromlist=[class_name])
+        cls = getattr(mod, class_name)
+    else:
+        cls = target
 
-        self.test_mode = test_mode
+    return cls(**params)
 
-        if test_mode:
-            print(f"[UnifoLM] Running in TEST MODE (demo for task: {self.prompt})", flush=True)
-            return
 
-        if checkpoint is None:
-            raise ValueError("WAM_CHECKPOINT must be set for UnifoLM (or use test_mode=True)")
+def load_model_checkpoint(model: torch.nn.Module, ckpt: str) -> torch.nn.Module:
+    """Load model weights from checkpoint file."""
+    print(f"[UnifoLM] Loading checkpoint from: {ckpt}", flush=True)
 
-        self._load_model(checkpoint)
+    state_dict = torch.load(ckpt, map_location="cpu")
+    if "state_dict" in state_dict:
+        raw_sd = state_dict["state_dict"]
+    elif "module" in state_dict:
+        raw_sd = OrderedDict()
+        for key in state_dict['module'].keys():
+            raw_sd[key[16:]] = state_dict['module'][key]
+    else:
+        raw_sd = state_dict
 
-    def _load_model(self, checkpoint: str) -> None:
-        """Load model from checkpoint (HuggingFace Hub preferred)."""
-        checkpoint = checkpoint.strip()
+    # Rename legacy keys
+    renamed_sd = OrderedDict()
+    for k, v in raw_sd.items():
+        new_k = k.replace("framestride_embed", "fps_embedding")
+        renamed_sd[new_k] = v
 
-        # Try HuggingFace Hub first (format: "org/model-name")
-        if "/" in checkpoint and not checkpoint.endswith(".ckpt") and not checkpoint.endswith(".pt"):
-            self._load_from_hf_hub(checkpoint)
-        # Try local file as fallback (includes .ckpt, .pt)
-        elif os.path.isfile(checkpoint):
-            # For local .ckpt files, prefer HuggingFace Hub to get full architecture
-            print(f"[UnifoLM] Note: Local .ckpt file detected. For full video generation support, prefer HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0')", flush=True)
-            self._load_from_local(checkpoint)
+    # Load with strict=False: mismatched-shape keys are silently skipped
+    result = model.load_state_dict(renamed_sd, strict=False)
+    if result.missing_keys:
+        print(f"[UnifoLM] Missing keys ({len(result.missing_keys)}): {result.missing_keys[:5]}...", flush=True)
+    if result.unexpected_keys:
+        print(f"[UnifoLM] Unexpected keys ({len(result.unexpected_keys)}): {result.unexpected_keys[:3]}...", flush=True)
+
+    print(f"[UnifoLM] Checkpoint loaded successfully", flush=True)
+    return model
+
+
+def get_device_from_parameters(module: torch.nn.Module) -> torch.device:
+    """Get device from module parameters."""
+    return next(iter(module.parameters())).device
+
+
+def get_latent_z(model: torch.nn.Module, videos: torch.Tensor) -> torch.Tensor:
+    """Encode videos into latent space.
+
+    Args:
+        model: Model with encode_first_stage method.
+        videos: Input videos [B, C, T, H, W] in [-1, 1].
+
+    Returns:
+        Latent tensor [B, C, T, h, w] where h=H//8, w=W//8.
+    """
+    b, c, t, h, w = videos.shape
+    x = rearrange(videos, 'b c t h w -> (b t) c h w')
+    z = model.encode_first_stage(x)
+    z = rearrange(z, '(b t) c h w -> b c t h w', b=b, t=t)
+    return z
+
+
+def image_guided_synthesis(
+        model: torch.nn.Module,
+        prompts: list,
+        observation: Dict[str, torch.Tensor],
+        noise_shape: list,
+        ddim_steps: int = 16,
+        ddim_eta: float = 1.0,
+        unconditional_guidance_scale: float = 1.0,
+        fs: int = MODEL_FPS,
+        timestep_spacing: str = 'uniform',
+        guidance_rescale: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run inference with DDIM sampling.
+
+    Mirrors scripts/evaluation/real_eval_server.py::image_guided_synthesis.
+
+    Args:
+        model: LatentVisualDiffusion model instance.
+        prompts: List of text prompts (length = batch_size).
+        observation: Dict with keys:
+            - 'observation.images.top': [B, T, C, H, W] in [-1, 1]
+            - 'observation.state':      [B, T, state_dim]
+            - 'action':                 [B, T, action_dim] (zeros placeholder)
+        noise_shape: [B, C, T, h, w] latent noise shape.
+        ddim_steps: Number of DDIM denoising steps.
+        ddim_eta: DDIM eta (1.0 = stochastic, 0.0 = deterministic).
+        unconditional_guidance_scale: CFG scale (1.0 = no guidance).
+        fs: Frame stride / FPS condition value.
+        timestep_spacing: DDIM timestep spacing strategy.
+        guidance_rescale: Guidance rescale factor.
+
+    Returns:
+        (batch_variants, actions, states):
+            batch_variants: Decoded video [B, C, T, H, W].
+            actions: Predicted action trajectory [B, horizon, action_dim].
+            states: Predicted state trajectory [B, horizon, state_dim].
+    """
+    from unifolm_wma.models.samplers.ddim import DDIMSampler
+
+    batch_size = noise_shape[0]
+    ddim_sampler = DDIMSampler(model)
+    fs_tensor = torch.tensor([fs] * batch_size, dtype=torch.long, device=model.device)
+
+    img = observation['observation.images.top']          # [B, T, C, H, W]
+    cond_img = img[:, -1, ...]                           # [B, C, H, W] — last obs frame
+
+    # Image cross-attention embeddings (from CLIP image encoder + projector)
+    cond_img_emb = model.embedder(cond_img)              # [B, 257, 1280]
+    cond_img_emb = model.image_proj_model(cond_img_emb)  # [B, 16, 1024]
+
+    # Build latent conditioning (hybrid mode: concat latent of obs frame)
+    cond = {}
+    if model.model.conditioning_key == 'hybrid':
+        # Encode all observation frames: img [B, T, C, H, W] → [B, C, T, H, W]
+        z = get_latent_z(model, img.permute(0, 2, 1, 3, 4))  # [B, 4, T, 40, 64]
+        # Use last frame as concat condition, repeated for all future frames
+        img_cat_cond = z[:, :, -1:, :, :]                    # [B, 4, 1, 40, 64]
+        img_cat_cond = repeat(img_cat_cond,
+                              'b c t h w -> b c (repeat t) h w',
+                              repeat=noise_shape[2])          # [B, 4, 16, 40, 64]
+        cond["c_concat"] = [img_cat_cond]
+
+    # Text conditioning
+    cond_ins_emb = model.get_learned_conditioning(prompts)  # [B, 77, 1024]
+
+    # State conditioning
+    cond_state = model.state_projector(observation['observation.state'])     # [B, T, 1024]
+    cond_state_emb = model.agent_state_pos_emb + cond_state                  # [B, T, 1024]
+
+    # Action conditioning (zeroed out during inference — model predicts actions)
+    cond_action = model.action_projector(observation['action'])              # [B, T, 1024]
+    cond_action_emb = model.agent_action_pos_emb + cond_action
+    cond_action_emb = torch.zeros_like(cond_action_emb)                     # zero out
+
+    # Combined cross-attention context: [state | instruction | image_emb]
+    cond["c_crossattn"] = [
+        torch.cat([cond_state_emb, cond_ins_emb, cond_img_emb], dim=1)
+    ]
+
+    # Action head conditioning: raw images + states for last n_obs_steps_acting
+    n_act = model.n_obs_steps_acting
+    cond["c_crossattn_action"] = [
+        img.permute(0, 2, 1, 3, 4)[:, :, -n_act:],   # [B, C, n_act, H, W]
+        observation['observation.state'][:, -n_act:]   # [B, n_act, state_dim]
+    ]
+
+    kwargs = {"unconditional_conditioning_img_nonetext": None}
+
+    # DDIM sampling — returns (latent_samples, actions, states, intermediates)
+    samples, actions, states, _ = ddim_sampler.sample(
+        S=ddim_steps,
+        conditioning=cond,
+        batch_size=batch_size,
+        shape=noise_shape[1:],
+        verbose=False,
+        unconditional_guidance_scale=unconditional_guidance_scale,
+        unconditional_conditioning=None,
+        eta=ddim_eta,
+        cfg_img=None,
+        mask=None,
+        x0=None,
+        fs=fs_tensor,
+        timestep_spacing=timestep_spacing,
+        guidance_rescale=guidance_rescale,
+        **kwargs
+    )
+
+    # Decode latent → pixel space
+    batch_images = model.decode_first_stage(samples)
+
+    return batch_images, actions, states
+
+
+class ACTTemporalEnsembler:
+    """Exponential weighted temporal ensemble (from ACT paper)."""
+
+    def __init__(self, temporal_ensemble_coeff: float = 0.01, chunk_size: int = 16, exe_steps: int = 8):
+        self.chunk_size = chunk_size
+        self.exe_steps = exe_steps
+        self.ensemble_weights = torch.exp(-temporal_ensemble_coeff * torch.arange(chunk_size))
+        self.ensemble_weights_cumsum = torch.cumsum(self.ensemble_weights, dim=0)
+        self.reset()
+
+    def reset(self):
+        self.ensembled_actions = None
+        self.ensembled_actions_count = None
+
+    def update(self, actions: torch.Tensor) -> torch.Tensor:
+        """Apply exponential weighted temporal ensemble smoothing."""
+        self.ensemble_weights = self.ensemble_weights.to(device=actions.device)
+        self.ensemble_weights_cumsum = self.ensemble_weights_cumsum.to(device=actions.device)
+
+        if self.ensembled_actions is None:
+            self.ensembled_actions = actions.clone()
+            self.ensembled_actions_count = torch.ones(
+                (self.chunk_size, 1), dtype=torch.long, device=self.ensembled_actions.device
+            )
         else:
-            raise FileNotFoundError(
-                f"Checkpoint not found: {checkpoint!r}\n"
-                f"Expected either:\n"
-                f"  - HuggingFace Hub ID (e.g., 'unitree/unifolm-wma-0') [RECOMMENDED for video generation]\n"
-                f"  - Local file path (e.g., '/path/to/model.pt')"
+            self.ensembled_actions *= self.ensemble_weights_cumsum[self.ensembled_actions_count - 1]
+            self.ensembled_actions += (
+                actions[:, : -self.exe_steps] * self.ensemble_weights[self.ensembled_actions_count]
+            )
+            self.ensembled_actions /= self.ensemble_weights_cumsum[self.ensembled_actions_count]
+            self.ensembled_actions_count = torch.clamp(self.ensembled_actions_count + 1, max=self.chunk_size)
+            self.ensembled_actions = torch.cat([self.ensembled_actions, actions[:, -self.exe_steps :]], dim=1)
+            self.ensembled_actions_count = torch.cat(
+                [
+                    self.ensembled_actions_count,
+                    torch.ones((self.exe_steps, 1), dtype=torch.long, device=self.ensembled_actions_count.device),
+                ]
             )
 
-    def _load_from_hf_hub(self, hf_hub_id: str) -> None:
-        """Load model from HuggingFace Hub."""
-        try:
-            from transformers import AutoModel
-            print(f"[UnifoLM] Loading from HuggingFace Hub: {hf_hub_id}", flush=True)
-            self.model = AutoModel.from_pretrained(hf_hub_id, trust_remote_code=True)
-            self.model = self.model.to(self.device)
-            self.model.eval()
-            print(f"[UnifoLM] Model loaded successfully (device: {self.device})", flush=True)
-        except ImportError:
-            raise ImportError("transformers library required for HuggingFace Hub loading")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load from HuggingFace Hub '{hf_hub_id}': {e}")
+        actions_out, self.ensembled_actions, self.ensembled_actions_count = (
+            self.ensembled_actions[:, : self.exe_steps],
+            self.ensembled_actions[:, self.exe_steps :],
+            self.ensembled_actions_count[self.exe_steps :],
+        )
+        return actions_out
 
-    def _load_from_local(self, checkpoint_path: str) -> None:
-        """Load model from local checkpoint file (PyTorch or PyTorch Lightning)."""
-        try:
-            print(f"[UnifoLM] Loading from local checkpoint: {checkpoint_path}", flush=True)
-            checkpoint_path = Path(checkpoint_path).resolve()
 
-            # Load PyTorch checkpoint
-            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+class UnifoLMModel:
+    """UnifoLM-WMA-0 using real model loading with DDIM sampling."""
 
-            # Handle PyTorch Lightning format
-            if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                print(f"[UnifoLM] Detected PyTorch Lightning checkpoint format", flush=True)
-                state_dict = ckpt["state_dict"]
-                # Remove 'model.' prefix if present (PyTorch Lightning convention)
-                state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
-            elif isinstance(ckpt, dict) and "model" in ckpt:
-                print(f"[UnifoLM] Found 'model' key in checkpoint", flush=True)
-                state_dict = ckpt["model"]
-            elif isinstance(ckpt, dict):
-                state_dict = ckpt
-            else:
-                raise RuntimeError(f"Unexpected checkpoint format: {type(ckpt)}")
+    def __init__(self, checkpoint: str | None, prompt: str | None = None):
+        """Initialize with real model loading from config and checkpoint."""
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = None
+        self.step_count = 0
+        self.prompt = prompt or "pick and place green cube in white basket"
 
-            # Analyze output layer to determine output dimensions
-            output_dims = self._infer_output_dims(state_dict)
-            print(f"[UnifoLM] Inferred output dimensions: {output_dims}", flush=True)
+        # Config from deployment
+        self.ddim_steps = 16
+        self.ddim_eta = 1.0
+        self.horizon = MODEL_HORIZON          # 16 timesteps
+        self.agent_action_dim = 14            # G1 arms: 14 DOF (7 + 7)
+        self.model_action_dim = MODEL_ACTION_DIM  # model output: 16-dim
+        self.model_state_dim = MODEL_STATE_DIM    # model input: 16-dim
+        # n_obs_steps must match config: n_obs_steps_imagen = 2
+        self.n_obs_steps = 2
 
-            # Build model with correct output dimensions
-            self.model = self._build_model(output_dims=output_dims)
-
-            # Load state dict with non-strict mode to handle architecture mismatches
-            if isinstance(state_dict, dict):
-                missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
-                if missing:
-                    print(f"[UnifoLM] Missing keys: {len(missing)}", flush=True)
-                if unexpected:
-                    print(f"[UnifoLM] Unexpected keys: {len(unexpected)}", flush=True)
-
-            self.model = self.model.to(self.device)
-            self.model.eval()
-
-            print(f"[UnifoLM] Model loaded successfully (device: {self.device})", flush=True)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint '{checkpoint_path}': {e}")
-
-    def _infer_output_dims(self, state_dict: dict) -> int:
-        """Try to infer output dimensions from checkpoint state dict."""
-        print(f"[UnifoLM] Analyzing checkpoint structure ({len(state_dict)} keys)...", flush=True)
-
-        # Print first 10 keys for debugging
-        for i, key in enumerate(list(state_dict.keys())[:10]):
-            param = state_dict[key]
-            shape_str = str(param.shape) if hasattr(param, "shape") else str(type(param))
-            print(f"  [{i}] {key}: {shape_str}", flush=True)
-
-        # Look for final output layer
-        for key, param in state_dict.items():
-            if "output" in key.lower() or "head" in key.lower():
-                if hasattr(param, "shape") and len(param.shape) >= 1:
-                    out_dim = int(param.shape[-1])
-                    print(f"[UnifoLM] Found output layer '{key}' with dimension {out_dim}", flush=True)
-                    return out_dim
-
-        print(f"[UnifoLM] No output layer found in state dict, using default {self.output_dim}", flush=True)
-        return self.output_dim
-
-    def _build_model(self, output_dims: int | None = None) -> nn.Module:
-        """Build a simple MLP model (fallback for checkpoint loading)."""
-        if output_dims is None:
-            output_dims = self.output_dim
-        return nn.Sequential(
-            nn.Linear(self.input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, output_dims),
+        # Temporal ensemble
+        self.temporal_ensembler = ACTTemporalEnsembler(
+            temporal_ensemble_coeff=0.01,
+            chunk_size=self.horizon,
+            exe_steps=8
         )
 
-    def __call__(self, state: RobotState) -> tuple:
+        # History buffers — keep last n_obs_steps frames/states
+        self.obs_image_history = deque(maxlen=self.n_obs_steps)
+        self.obs_state_history = deque(maxlen=self.n_obs_steps)
+        self.action_history = deque(maxlen=self.horizon)
+        self.last_camera_image = None
+
+        # Normalization stats (loaded from G1 pack camera dataset)
+        self.norm_stats = self._load_normalization_stats()
+
+        # Robot head camera SHM — preferred over Isaac top-down frame
+        self.camera_shm_map = None
+        self._init_camera_shm()
+
+        print(f"[UnifoLM] Initializing with REAL model loading", flush=True)
+        print(f"[UnifoLM] Task: {self.prompt}", flush=True)
+        print(f"[UnifoLM] Device: {self.device}", flush=True)
+        print(f"[UnifoLM] DDIM steps: {self.ddim_steps}", flush=True)
+        print(f"[UnifoLM] n_obs_steps: {self.n_obs_steps}", flush=True)
+        print(f"[UnifoLM] model_action_dim: {self.model_action_dim} (trim to {self.agent_action_dim} for G1)", flush=True)
+
+        if checkpoint is None:
+            raise ValueError("WAM_CHECKPOINT must be set (path to .ckpt file)")
+
+        self._load_model_real(checkpoint)
+
+    # ── normalisation ─────────────────────────────────────────────────────────
+
+    def _load_normalization_stats(self) -> Optional[Dict[str, Any]]:
+        """Load G1 Pack Camera min/max stats for state + action normalisation.
+
+        Stats are bundled in the unifolm repo examples directory at:
+          G1_PACK_CAMERA_STATS_PATH
+        Format: safetensors with keys like "observation.state/min", "action/max", …
+        After unflatten_dict → {"observation.state": {"min": tensor, "max": tensor}, …}
         """
-        Run inference to generate velocity commands and optionally video prediction.
+        try:
+            from safetensors.torch import load_file as safetensors_load
+
+            def _unflatten(d, sep="/"):
+                out: Dict[str, Any] = {}
+                for k, v in d.items():
+                    parts = k.split(sep)
+                    node = out
+                    for part in parts[:-1]:
+                        node = node.setdefault(part, {})
+                    node[parts[-1]] = v
+                return out
+
+            raw = safetensors_load(G1_PACK_CAMERA_STATS_PATH)
+            stats = _unflatten(raw)
+
+            state_min = stats['observation.state']['min'].float()  # [16]
+            state_max = stats['observation.state']['max'].float()  # [16]
+            action_min = stats['action']['min'].float()            # [16]
+            action_max = stats['action']['max'].float()            # [16]
+
+            print(f"[UnifoLM] ✓ Loaded G1 pack camera normalization stats", flush=True)
+            print(f"[UnifoLM]   state min[:5]={state_min[:5].tolist()}", flush=True)
+            print(f"[UnifoLM]   state max[:5]={state_max[:5].tolist()}", flush=True)
+            print(f"[UnifoLM]   action min[:5]={action_min[:5].tolist()}", flush=True)
+            print(f"[UnifoLM]   action max[:5]={action_max[:5].tolist()}", flush=True)
+
+            return {
+                'observation.state': {'min': state_min, 'max': state_max},
+                'action':            {'min': action_min, 'max': action_max},
+            }
+        except Exception as e:
+            print(f"[UnifoLM] WARNING: Could not load norm stats ({e})", flush=True)
+            print(f"[UnifoLM]   → feeding raw joint angles to model (suboptimal)", flush=True)
+            return None
+
+    def _unnormalize_actions(self, actions_norm: torch.Tensor) -> torch.Tensor:
+        """Convert model action output from [-1, 1] back to actual joint angles.
+
+        Formula (inverse of min-max normalise):
+            joint_angle = (norm + 1) / 2 * (max - min) + min
 
         Args:
-            state: RobotState (q, dq, tau with 29-DOF measurements)
+            actions_norm: [horizon, action_dim] in [-1, 1].
 
         Returns:
-            (vx, vy, wz, body_height, video_output)
-            where video_output is torch.Tensor or numpy array if model generates it, else None
+            [horizon, action_dim] in original joint-angle space (radians).
         """
-        if self.test_mode:
-            vx, vy, wz, body_height = self._arm_extend_demo(state)
-            return vx, vy, wz, body_height, None
+        if self.norm_stats is None:
+            return actions_norm  # passthrough — no stats available
 
-        if self.model is None:
-            raise RuntimeError("Model not loaded. Set WAM_CHECKPOINT or use test_mode=True.")
+        action_min = self.norm_stats['action']['min'].to(actions_norm.device)  # [16]
+        action_max = self.norm_stats['action']['max'].to(actions_norm.device)  # [16]
 
+        # Shape: [horizon, 16] × [16] — broadcast over horizon dimension
+        actions_unnorm = (actions_norm + 1.0) / 2.0 * (action_max - action_min) + action_min
+        return actions_unnorm
+
+    # ── camera ────────────────────────────────────────────────────────────────
+
+    def _init_camera_shm(self) -> None:
+        """Open robot head camera SHM (/run/mws/camera.rgb).
+
+        The SHM is written by the Isaac Sim bridge and contains raw RGB bytes
+        for the D435i camera mounted on G1's head — same perspective as the
+        training dataset (G1_Dex1_MountCameraRedGripper).  Falls back to the
+        Isaac editor top-down frame (/tmp/isaac_frame.png) when not available.
+        """
+        try:
+            import os as _os
+            if not _os.path.exists(CAMERA_SHM_PATH):
+                print(f"[UnifoLM] Camera SHM not found at {CAMERA_SHM_PATH} "
+                      f"— will use /tmp/isaac_frame.png", flush=True)
+                return
+            self.camera_shm_map = open(CAMERA_SHM_PATH, "rb")
+            print(f"[UnifoLM] ✓ Camera SHM: {CAMERA_SHM_PATH} "
+                  f"(D435i head cam, {CAMERA_SHM_W}×{CAMERA_SHM_H} RGB)", flush=True)
+        except Exception as e:
+            print(f"[UnifoLM] Camera SHM init warning: {e}", flush=True)
+
+    def _read_camera_shm(self) -> Optional[np.ndarray]:
+        """Read one frame from the D435i head-camera SHM.
+
+        Returns:
+            uint8 BGR array [720, 1280, 3] or None on error.
+        """
+        if self.camera_shm_map is None:
+            return None
+        try:
+            self.camera_shm_map.seek(0)
+            raw = self.camera_shm_map.read(CAMERA_SHM_SIZE)
+            if len(raw) < CAMERA_SHM_SIZE:
+                return None
+            rgb = np.frombuffer(raw, dtype=np.uint8).reshape(CAMERA_SHM_H, CAMERA_SHM_W, 3)
+            # Convert RGB → BGR so the rest of the pipeline (cv2) is uniform
+            return np.ascontiguousarray(rgb[:, :, ::-1])
+        except Exception:
+            return None
+
+    def _load_model_real(self, checkpoint: str) -> None:
+        """Load model using OmegaConf config and instantiate_from_config."""
+        print(f"[UnifoLM] Loading model from checkpoint: {checkpoint}", flush=True)
+
+        try:
+            # Load config
+            config_path = "/workspace/wam/config_model.yaml"
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Config not found: {config_path}")
+
+            config = OmegaConf.load(config_path)
+            print(f"[UnifoLM] Config loaded", flush=True)
+
+            # Instantiate model
+            print(f"[UnifoLM] Instantiating model from config...", flush=True)
+            self.model = instantiate_from_config(config.model)
+            self.model = self.model.to(self.device)
+            self.model.eval()
+
+            # Load checkpoint
+            if os.path.exists(checkpoint):
+                self.model = load_model_checkpoint(self.model, checkpoint)
+                print(f"[UnifoLM] Model ready for inference", flush=True)
+            else:
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+
+        except Exception as e:
+            print(f"[UnifoLM] ERROR loading model: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            self.model = None
+
+    def _get_camera_image(self) -> np.ndarray:
+        """Get camera image, preferring the robot head camera (D435i SHM).
+
+        Priority:
+          1. /run/mws/camera.rgb  — D435i head camera (same perspective as
+             training data G1_Dex1_MountCameraRedGripper).  PREFERRED.
+          2. /tmp/isaac_frame.png — Isaac Sim editor top-down view (fallback;
+             distribution mismatch with training data causes dark video output).
+          3. Last cached image.
+          4. Black frame (zeros).
+
+        Returns BGR uint8 array.
+        """
+        try:
+            # 1. Robot head camera from SHM (preferred — matches training distribution)
+            shm_img = self._read_camera_shm()
+            if shm_img is not None:
+                self.last_camera_image = shm_img
+                return shm_img
+
+            # 2. Isaac Sim editor frame (top-down, fallback)
+            isaac_path = Path("/tmp/isaac_frame.png")
+            if isaac_path.exists():
+                img = cv2.imread(str(isaac_path))
+                if img is not None:
+                    self.last_camera_image = img
+                    return img
+
+            # 3. Last cached frame
+            if self.last_camera_image is not None:
+                return self.last_camera_image
+
+            # 4. Black frame
+            return np.zeros((CAMERA_SHM_H, CAMERA_SHM_W, 3), dtype=np.uint8)
+
+        except Exception as e:
+            print(f"[UnifoLM] Camera error: {e}", flush=True)
+            return np.zeros((CAMERA_SHM_H, CAMERA_SHM_W, 3), dtype=np.uint8)
+
+    def _prepare_image_tensor(self, image: np.ndarray) -> torch.Tensor:
+        """Convert BGR numpy image to normalized float tensor [C, H, W] in [-1, 1].
+
+        Resizes to MODEL_INPUT_H x MODEL_INPUT_W (320x512) as expected by the model.
+        """
+        img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (MODEL_INPUT_W, MODEL_INPUT_H), interpolation=cv2.INTER_LINEAR)
+        # Normalize to [-1, 1]: (x/255 - 0.5) * 2 = x/127.5 - 1
+        img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float()
+        img_tensor = (img_tensor / 255.0 - 0.5) * 2.0
+        return img_tensor  # [3, 320, 512]
+
+    def _prepare_state_tensor(self, q: np.ndarray) -> torch.Tensor:
+        """Pad 14-DOF arm state to 16-DOF and min-max normalise to [-1, 1].
+
+        The model was trained with agent_state_dim=16 and min_max normalisation
+        using G1 Pack Camera dataset stats.  Dims 14–15 are padded with zeros
+        (gripper channels in training data; they map to ≈ -1 after normalisation,
+        which the model has seen during training for the padded-robot case).
+
+        Normalisation formula:
+            norm = (x - min) / (max - min + 1e-8) * 2 - 1   → [-1, 1]
+        """
+        state_16 = np.zeros(self.model_state_dim, dtype=np.float32)
+        state_16[:len(q)] = q
+        state_tensor = torch.from_numpy(state_16).float()  # [16]
+
+        if self.norm_stats is not None:
+            state_min = self.norm_stats['observation.state']['min']  # [16]
+            state_max = self.norm_stats['observation.state']['max']  # [16]
+            state_tensor = (state_tensor - state_min) / (state_max - state_min + 1e-8) * 2.0 - 1.0
+            state_tensor = torch.clamp(state_tensor, -1.0, 1.0)
+
+        return state_tensor  # [16]
+
+    def __call__(self, state: RobotState) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Production inference: returns (action_traj, state_traj, video_output).
+
+        action_traj shape: (16, 14) — 16 timesteps × 14 DOF (both arms).
+        Send action_traj[0] directly to robot as joint targets.
+        """
         try:
             self.step_count += 1
 
-            # Prepare input: concatenate joint positions and velocities
-            q = np.array(state.q, dtype=np.float32)
-            dq = np.array(state.dq, dtype=np.float32)
-            obs = np.concatenate([q, dq])[:self.input_dim]
+            if self.step_count % 10 == 0:
+                print(f"[UnifoLM] Step {self.step_count} - inference starting", flush=True)
 
-            vx, vy, wz, body_height, video_output = 0.0, 0.0, 0.0, 0.0, None
+            if self.model is None:
+                print(f"[UnifoLM] Model not loaded, returning zero trajectories", flush=True)
+                return (
+                    torch.zeros((self.horizon, self.agent_action_dim)),
+                    torch.zeros((self.horizon, self.agent_action_dim)),
+                    None,
+                )
 
-            # Inference
+            # --- Prepare inputs ---
+            image = self._get_camera_image()
+            q_raw = np.array(state.q, dtype=np.float32)[:self.agent_action_dim]
+
+            img_tensor = self._prepare_image_tensor(image)      # [3, 320, 512]
+            state_tensor = self._prepare_state_tensor(q_raw)    # [16]
+
+            # --- Update observation history ---
+            self.obs_image_history.append(img_tensor)
+            self.obs_state_history.append(state_tensor)
+            self.action_history.append(torch.zeros(self.agent_action_dim))
+
+            # --- Warmup: wait until we have n_obs_steps frames ---
+            if len(self.obs_image_history) < self.n_obs_steps:
+                if self.step_count % 5 == 0:
+                    print(f"[UnifoLM] Warming up: {len(self.obs_image_history)}/{self.n_obs_steps}", flush=True)
+                return (
+                    torch.zeros((self.horizon, self.agent_action_dim)),
+                    torch.zeros((self.horizon, self.agent_action_dim)),
+                    None,
+                )
+
+            # --- Run real DDIM inference ---
             with torch.no_grad():
-                obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(self.device)
-                output = self.model(obs_tensor)
+                try:
+                    # Stack history into batched tensors
+                    # obs images: [B, T, C, H, W] = [1, 2, 3, 320, 512]
+                    img_seq = torch.stack(list(self.obs_image_history))   # [T, C, H, W]
+                    img_input = img_seq.unsqueeze(0).to(self.device)       # [1, T, C, H, W]
 
-                # Handle different model output formats
-                # unifolm_v1.pt: outputs only [1, 3] (vx, vy, wz)
-                # Full WMA: outputs [1, 4+] (vx, vy, wz, body_height, [video...])
+                    # obs states: [B, T, D] = [1, 2, 16]
+                    state_seq = torch.stack(list(self.obs_state_history))  # [T, D]
+                    state_input = state_seq.unsqueeze(0).to(self.device)   # [1, T, D]
 
-                if isinstance(output, torch.Tensor):
-                    output_shape = output.shape
+                    # zero action placeholder: [B, horizon, D] = [1, 16, 16]
+                    # agent_action_pos_emb has shape [1, horizon, 1024] — one slot per
+                    # predicted timestep, NOT per obs step.
+                    action_input = torch.zeros(
+                        1, self.horizon, self.model_action_dim,
+                        device=self.device
+                    )
 
-                    # Debug: log output shape every 100 steps
-                    if self.step_count % 100 == 0:
-                        print(f"[UnifoLM] Model output shape: {output_shape}  step={self.step_count}", flush=True)
+                    observation = {
+                        'observation.images.top': img_input,
+                        'observation.state': state_input,
+                        'action': action_input,
+                    }
 
-                    if output_shape[1] >= 3:
-                        # Extract first 3 values (vx, vy, wz)
-                        vx = float(output[0, 0].cpu().numpy())
-                        vy = float(output[0, 1].cpu().numpy())
-                        wz = float(output[0, 2].cpu().numpy())
+                    if self.step_count % 10 == 0:
+                        print(f"[UnifoLM] Calling DDIM sampler, ddim_steps={self.ddim_steps}", flush=True)
 
-                        # Body height (optional, for newer models)
-                        if output_shape[1] > 3:
-                            body_height = float(output[0, 3].cpu().numpy())
-                        else:
-                            body_height = 0.0
+                    # Real DDIM inference
+                    video_output, pred_actions, pred_states = image_guided_synthesis(
+                        model=self.model,
+                        prompts=[self.prompt],
+                        observation=observation,
+                        noise_shape=NOISE_SHAPE,
+                        ddim_steps=self.ddim_steps,
+                        ddim_eta=self.ddim_eta,
+                        unconditional_guidance_scale=1.0,
+                        fs=MODEL_FPS,
+                        timestep_spacing='uniform',
+                        guidance_rescale=0.0,
+                    )
 
-                        # Video output (optional, for full WMA model)
-                        if output_shape[1] > 4:
-                            video_output = output[:, 4:].cpu()
-                        else:
-                            video_output = None
-                    else:
-                        print(f"[UnifoLM] Warning: Model output shape {output_shape} too small, using zero actions", flush=True)
-                        return 0.0, 0.0, 0.0, 0.0, None
+                    # pred_actions: [B, horizon, model_action_dim] = [1, 16, 16]
+                    # pred_states:  [B, horizon, model_state_dim]  = [1, 16, 16]
+                    if pred_actions is not None and pred_actions.shape[0] == 1:
+                        pred_actions = pred_actions.squeeze(0)  # [16, 16]
+                    if pred_states is not None and pred_states.shape[0] == 1:
+                        pred_states = pred_states.squeeze(0)    # [16, 16]
 
-            # Clamp action to reasonable ranges
-            vx = float(np.clip(vx, -1.0, 1.0))
-            vy = float(np.clip(vy, -1.0, 1.0))
-            wz = float(np.clip(wz, -np.pi, np.pi))
+                    # Unnormalise actions from model space [-1, 1] → actual joint angles (rad)
+                    # pred_actions is [16, 16] here (already squeezed above)
+                    # Must unnormalise BEFORE trimming so the 16 stats dims align properly.
+                    pred_actions_unnorm = self._unnormalize_actions(pred_actions)  # [16, 16] rad
 
-            return vx, vy, wz, body_height, video_output
+                    # Trim from 16-dim to 14-dim (G1 arm DOF)
+                    action_traj = pred_actions_unnorm[:, :self.agent_action_dim].cpu()  # [16, 14]
+                    state_traj = pred_states[:, :self.agent_action_dim].cpu()           # [16, 14]
+
+                except Exception as e:
+                    print(f"[UnifoLM] Inference failed: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    # Do NOT fall back to randn — return zeros so we can tell if inference worked
+                    action_traj = torch.zeros((self.horizon, self.agent_action_dim))
+                    state_traj = torch.zeros((self.horizon, self.agent_action_dim))
+                    video_output = None
+
+            # --- Apply temporal ensemble ---
+            pred_actions_batched = action_traj.unsqueeze(0)  # [1, 16, 14]
+            actions_ensemble = self.temporal_ensembler.update(pred_actions_batched)
+
+            # Log every 10 steps
+            if self.step_count % 10 == 0:
+                action_0 = actions_ensemble[0, 0].cpu().numpy()
+                action_0_norm = float(np.linalg.norm(action_0))
+                action_full_norm = float((action_traj ** 2).sum() ** 0.5)
+                print(
+                    f"[UnifoLM] Step {self.step_count}: "
+                    f"action[0]_norm={action_0_norm:.4f} "
+                    f"traj_norm={action_full_norm:.4f}",
+                    flush=True,
+                )
+
+            # Record latest step action in history
+            action_0_val = actions_ensemble[0, 0].cpu()
+            self.action_history.append(action_0_val.float())
+
+            return action_traj, state_traj, video_output
+
         except Exception as e:
-            print(f"[UnifoLM] Inference error: {e}", flush=True)
+            print(f"[UnifoLM] FATAL ERROR: {e}", flush=True)
             import traceback
             traceback.print_exc()
-            return 0.0, 0.0, 0.0, 0.0, None
-
-    def _arm_extend_demo(self, state: RobotState) -> tuple[float, float, float, float]:
-        """
-        Demo behavior based on task prompt.
-
-        Supports:
-          - "pick and place": Walk towards table, pick green cube, place in basket
-          - default: Extend arms forward in place
-        """
-        self.step_count += 1
-
-        # Check if this is pick-and-place task
-        if "pick" in self.prompt.lower() and "place" in self.prompt.lower():
-            return self._pick_and_place_demo(state)
-        else:
-            return self._arm_extend_demo_original(state)
-
-    def _pick_and_place_demo(self, state: RobotState) -> tuple[float, float, float, float]:
-        """
-        Demo: Pick green cube from table and place in white basket.
-
-        Sequence (120 steps = 12 seconds at 10 Hz):
-          - Steps 0-30: Walk forward to table (0.3 m/s)
-          - Steps 30-60: Bend down and pick (arms down)
-          - Steps 60-90: Walk to basket (backward 0.2 m/s)
-          - Steps 90-120: Place cube in basket (arms up)
-          - Repeat cycle
-        """
-        cycle_length = 120
-        cycle_pos = self.step_count % cycle_length
-        phase = cycle_pos / cycle_length
-
-        if phase < 0.25:
-            # Walk forward to table
-            vx, vy, wz = 0.3, 0.0, 0.0
-            body_height = 0.0
-        elif phase < 0.5:
-            # Pick phase: stay, arms go down
-            vx, vy, wz = 0.0, 0.0, 0.0
-            body_height = -0.5  # Arm down signal
-        elif phase < 0.75:
-            # Walk backward to basket
-            vx, vy, wz = -0.2, 0.0, 0.0
-            body_height = -0.5
-        else:
-            # Place phase: stay, arms up
-            vx, vy, wz = 0.0, 0.0, 0.0
-            body_height = 0.5  # Arm up signal
-
-        return vx, vy, wz, body_height
-
-    def _arm_extend_demo_original(self, state: RobotState) -> tuple[float, float, float, float]:
-        """
-        Demo: Extend arms forward in place.
-
-        Robot stays still (vx=0, vy=0, wz=0) and extends arms forward in cycle:
-          - Phase 1 (0.0–0.33): Arms extending forward
-          - Phase 2 (0.33–0.66): Arms fully extended (hold position)
-          - Phase 3 (0.66–1.0): Arms retracting to rest
-          - Repeat every 3 seconds at 10 Hz (30 steps per cycle)
-
-        The arm motion is handled by GEAR-SONIC WBC.
-        We stay in place: vx=0, vy=0, wz=0 (all body motion commands = 0).
-        Body_height signal indicates arm extension: positive=extending, negative=retracting.
-        """
-        # Extension cycle: 3 seconds per cycle (30 steps at 10 Hz)
-        cycle_length = 30
-        cycle_pos = self.step_count % cycle_length
-        phase = cycle_pos / cycle_length  # Normalize to [0, 1)
-
-        # Arm extension phases (GEAR-SONIC will execute the actual arm targets)
-        if phase < 0.33:
-            # Phase 1: Arms extending forward
-            arm_state = "EXTENDING"
-            arm_effort = phase / 0.33  # Ramp 0 → 1
-        elif phase < 0.66:
-            # Phase 2: Arms fully extended (hold)
-            arm_state = "EXTENDED"
-            arm_effort = 1.0
-        else:
-            # Phase 3: Arms retracting to rest
-            arm_state = "RETRACTING"
-            arm_effort = 1.0 - (phase - 0.66) / 0.34  # Ramp 1 → 0
-
-        # Body commands: STAY IN PLACE
-        vx = 0.0  # No forward/back motion
-        vy = 0.0  # No left/right motion
-        wz = 0.0  # No rotation
-
-        # Use body_height to signal arm extension to GEAR-SONIC
-        # Positive body_height (up to 0.15) triggers arm extension forward
-        # Zero body_height keeps arms at rest
-        # This is a proxy signal: GEAR-SONIC will adjust arm targets based on body_height
-        body_height = arm_effort * 0.15  # Scale to reasonable height range
-
-        # Log every extension cycle (every 30 steps)
-        if cycle_pos == 0 and self.step_count > 1:
-            cycle_number = self.step_count // cycle_length
-            print(
-                f"\n{'='*80}",
-                flush=True,
+            return (
+                torch.zeros((self.horizon, self.agent_action_dim)),
+                torch.zeros((self.horizon, self.agent_action_dim)),
+                None,
             )
-            print(
-                f"[UnifoLM EXTEND] CYCLE #{cycle_number} COMPLETE! Arms ready for next extension...",
-                flush=True,
-            )
-            print(
-                f"{'='*80}\n",
-                flush=True,
-            )
-
-        # Log every second (10 steps at 10 Hz)
-        if self.step_count % 10 == 0:
-            cycle_number = self.step_count // cycle_length
-            cycle_progress = (cycle_pos / cycle_length) * 100
-            print(
-                f"[UnifoLM EXTEND] cycle={cycle_number}  progress={cycle_progress:5.1f}%  "
-                f"state={arm_state:8s}  effort={arm_effort:+.2f}  "
-                f"body=[vx={vx:.1f} vy={vy:.1f} wz={wz:.1f} h={body_height:+.2f}]",
-                flush=True,
-            )
-
-        return vx, vy, wz, body_height
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test / Standalone Mode
-# ─────────────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    """Test UnifoLM model with mock data."""
-    print("\n=== UnifoLM Test Mode ===\n", flush=True)
-
-    # Test 1: Create model in test mode (no checkpoint needed)
-    print("[Test 1] Initializing in test mode (arm extending forward demo)...", flush=True)
-    model = UnifoLMModel(checkpoint=None, test_mode=True)
-
-    # Test 2: Mock robot state
-    print("\n[Test 2] Running 10 seconds of inference with mock state...", flush=True)
-    mock_state = RobotState(
-        q=[0.0] * 29,  # Joint positions
-        dq=[0.0] * 29,  # Joint velocities
-        tau=[0.0] * 29,  # Joint torques
-        timestamp=time.time(),
-    )
-
-    # Run for 50 steps (5 sec at 10 Hz)
-    for i in range(50):
-        vx, vy, wz = model(mock_state)
-        if i % 10 == 0:
-            print(f"  Step {i}: vx={vx:.2f}, vy={vy:.2f}, wz={wz:.2f}", flush=True)
-
-    print("\n[Test] ✓ All tests passed", flush=True)
