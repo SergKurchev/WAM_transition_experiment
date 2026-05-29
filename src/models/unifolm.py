@@ -45,6 +45,17 @@ G1_PACK_CAMERA_STATS_PATH = (
     "/transitions/unitree_g1_pack_camera/meta_data/stats.safetensors"
 )
 
+# G1 joint mapping in unitree_hg LowState (35 slots total):
+#   [00-05] left leg  (hip pitch/roll/yaw, knee, ankle pitch/roll)
+#   [06-11] right leg (same order)
+#   [12-13] waist (yaw, roll)
+#   [14-20] left arm  (7 DOF)  ← model controls these
+#   [21-27] right arm (7 DOF)  ← model controls these
+#   [28]    gripper
+#   [29-34] unused (zeros)
+G1_ARM_JOINT_START = 14  # first arm joint index in LowState / LowCmd
+G1_ARM_JOINT_END   = 28  # last arm joint index + 1 → q[14:28] gives 14 DOF
+
 # Robot head camera SHM — D435i mounted on G1, looking at workspace.
 # Same perspective as training data (G1_Dex1_MountCameraRedGripper_Dataset).
 # Format: raw RGB bytes 1280×720, written by Isaac Sim bridge.
@@ -604,7 +615,8 @@ class UnifoLMModel:
 
             # --- Prepare inputs ---
             image = self._get_camera_image()
-            q_raw = np.array(state.q, dtype=np.float32)[:self.agent_action_dim]
+            # Extract arm joints from LowState: indices 14-27 (left arm 14-20, right arm 21-27)
+            q_raw = np.array(state.q, dtype=np.float32)[G1_ARM_JOINT_START:G1_ARM_JOINT_END]
 
             img_tensor = self._prepare_image_tensor(image)      # [3, 320, 512]
             state_tensor = self._prepare_state_tensor(q_raw)    # [16]

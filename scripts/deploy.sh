@@ -93,7 +93,55 @@ fi
 log_info "✓ mws-dimos on feat/real-transfer"
 
 # ============================================================================
-# 2. Build ros2-bridge image (required, not pre-built locally)
+# 2. Apply WAM patches to external code (mws-dimos, unifolm)
+# ============================================================================
+# Patches are idempotent — safe to run on every deploy.
+# Details: wam-stack/PATCHES.md
+
+log_info "Applying WAM patches to external code..."
+cd "$STACK_ROOT"
+
+PATCH_SCRIPT="$STACK_ROOT/scripts/patch_mws_dimos.py"
+if [ ! -f "$PATCH_SCRIPT" ]; then
+    log_error "Patch script not found: $PATCH_SCRIPT"
+    exit 1
+fi
+
+# Try python3; fall back to .venv if available
+PYTHON_CMD=""
+if command -v python3 &>/dev/null && python3 -c "import pathlib" &>/dev/null; then
+    PYTHON_CMD="python3"
+elif [ -f "$MWS_ROOT/.venv/bin/python" ]; then
+    PYTHON_CMD="$MWS_ROOT/.venv/bin/python"
+else
+    log_error "No Python found to run patch script."
+    exit 1
+fi
+
+$PYTHON_CMD "$PATCH_SCRIPT" || {
+    log_error "Patch script failed — check output above. Aborting deploy."
+    exit 1
+}
+
+log_info "✓ Patches applied"
+
+# ============================================================================
+# 3. Apply scene object positions and physics (scene_config.yaml)
+# ============================================================================
+
+log_info "Patching scene objects (positions + physics)..."
+SCENE_PATCH="$STACK_ROOT/scripts/patch_scene.py"
+if [ -f "$SCENE_PATCH" ]; then
+    $PYTHON_CMD "$SCENE_PATCH" || {
+        log_warn "patch_scene.py failed — continuing without scene patch"
+    }
+    log_info "✓ Scene patched"
+else
+    log_warn "patch_scene.py not found — skipping scene patch"
+fi
+
+# ============================================================================
+# 4. Build ros2-bridge image (required, not pre-built locally)
 # ============================================================================
 
 log_info "Checking ros2-bridge image..."
@@ -106,7 +154,7 @@ else
 fi
 
 # ============================================================================
-# 3. Handle --reset flag
+# 5. Handle --reset flag
 # ============================================================================
 
 cd "$STACK_ROOT"
@@ -117,7 +165,7 @@ if [[ "$@" == *"--reset"* ]]; then
 fi
 
 # ============================================================================
-# 4. Start stack
+# 6. Start stack
 # ============================================================================
 
 log_info "Starting wam-stack..."
@@ -129,8 +177,14 @@ fi
 
 docker compose up -d $BUILD_FLAG
 
+# Always restart sim-isaac so it loads the freshly patched USDZ.
+# (docker compose up -d skips already-running containers, so without this
+#  Isaac Sim keeps the old scene from whenever it was last started.)
+log_info "Restarting sim-isaac to load patched scene..."
+docker compose restart sim-isaac
+
 # ============================================================================
-# 5. Wait and report
+# 7. Wait and report
 # ============================================================================
 
 log_info "Waiting for services to initialize (1–2 minutes)..."
@@ -140,7 +194,7 @@ log_info "Current status:"
 docker compose ps
 
 # ============================================================================
-# 6. Port forwarding hint
+# 8. Port forwarding hint
 # ============================================================================
 
 echo ""

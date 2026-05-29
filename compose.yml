@@ -24,6 +24,10 @@ services:
       - ROBOT_USD_FILE=${ROBOT_USD_FILE:-g1_29dof.usd}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      # G1_KINEMATIC_ROBOT=1 → robot pelvis fixed at spawn, joints follow WAM
+      # commands exactly, never falls. Collision active → can interact with objects.
+      # G1_KINEMATIC_ROBOT=0 (default) → normal physics + support wrench.
+      - G1_KINEMATIC_ROBOT=${G1_KINEMATIC_ROBOT:-1}
     runtime: nvidia
     shm_size: '8gb'
     stdin_open: true
@@ -48,6 +52,7 @@ services:
       - /root/skurchev/workspace/wam-stack/media:/workspace/wam/media:rw
       - /root/skurchev/workspace/wam-stack/repos/unifolm:/workspace/unifolm:ro
       - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - /root/skurchev/workspace/hf_cache:/root/.cache/huggingface:rw
       - sim_bridge_shm:/run/mws
     environment:
       - NVIDIA_VISIBLE_DEVICES=all

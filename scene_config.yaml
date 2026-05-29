@@ -1,0 +1,50 @@
+# Scene object configuration for mws_office.usd
+#
+# Units: CENTIMETERS (metersPerUnit=0.01 in the USD file)
+# To convert: Isaac Sim displays in meters → multiply by 100 to get values here
+#
+# USD:  /root/skurchev/workspace/assets/mws_office.usd
+# USDZ: /root/skurchev/workspace/assets/mws_office.usdz  (auto-repacked by patch_scene.py)
+#
+# Apply with: python3 scripts/patch_scene.py
+# Runs automatically on every: bash scripts/deploy.sh
+
+# patch_scene.py extracts the USD from this USDZ, edits it in a temp file, repacks, deletes temp.
+# No loose .usd file ever appears in the assets dir → Isaac Sim never shows "fetch" prompt.
+usdz_path: /root/skurchev/workspace/assets/mws_office.usdz
+
+objects:
+
+  # Green cube — pick target
+  # Sitting on ComicTable surface (~y=56 cm). x/z set relative to table.
+  - path: /scene/objects/shapes/cube
+    translate: [-165.717, 54.052, -22.774]   # [x, y, z] in cm
+    physics:
+      rigid_body: true
+      mass_kg: 0.3
+      collision_mesh: /scene/objects/shapes/cube/Cube
+      approximation: convexHull
+
+  # White storage box — place target ("basket")
+  - path: /scene/objects/boxes/Office_storage_box_canvas
+    translate: [-155.492, 55.892, 20.855]
+    physics:
+      rigid_body: true
+      mass_kg: 0.5
+      approximation: convexHull   # applied to all child Mesh prims
+
+  # ComicTable — the table the cube sits on (part of FBX scene mesh)
+  # translate is LOCAL offset within FBX coordinate frame (not world offset)
+  # Keep at [0,0,0] unless you intentionally shift the table within the room mesh.
+  - path: /scene/Meshes/Sketchfab_model/aa383b1f866d4253a11a7b68064fd03e_fbx/RootNode/ComicTable_LP_001
+    translate: [-0.06, -0.06, 0.1]
+    physics: null   # static mesh — no rigid body
+
+  # /scene/floor — large floor Cube covering the ComicTable area (x: -236...-136 cm).
+  # No translate change. We just add CollisionAPI so objects that fall off the table land here.
+  # The floor cube top surface (y=0) matches the visual room floor.
+  # Original center was at y=-22.5; we move it to y=-50 so top surface = y=0.
+  - path: /scene/floor
+    translate: [-186.045, -50.0, 0.0]   # shift center down so top (y=0) matches visual floor
+    physics:
+      static_collision: true            # no rigid body — just a static collider

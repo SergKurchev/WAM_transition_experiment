@@ -23,17 +23,32 @@
 
 ---
 
-## Статус на 27 мая 2026
+## Статус на 28 мая 2026
 
-✅ **ПОЛНЫЙ ПАЙПЛАЙН РАБОТАЕТ.**
+✅ **ПОЛНЫЙ ПАЙПЛАЙН РАБОТАЕТ. РУКИ ДВИГАЮТСЯ В SUPPORT MODE.**
 
 ```
 [UnifoLM] ✓ Loaded G1 pack camera normalization stats
 [UnifoLM] ✓ Camera SHM: /run/mws/camera.rgb (D435i head cam, 1280×720 RGB)
 [WAM] rt/lowstate received. Control loop starting at 10 Hz.
-[WAM] loop=2  action_0[0:3]=[-0.420 +0.415 -0.166]  norm=1.185  traj_norm=4.960
-[RECORDING] Saved video: /workspace/wam/media/model_output/output_000002.mp4
+[WAM] loop=2  action_0[0:3]=[-0.238 +0.560 +0.168]  norm=0.935  traj_norm=3.761
+[RECORDING] Saved video: /workspace/wam/media/steps/step_000001/model_output.mp4
+# Arm joints changing in Isaac Sim (confirmed 28 May):
+#   arm_q[14:28] sample1: [0.3215, 0.1123, 0.0244, ...]
+#   arm_q[14:28] sample2: [0.5064, 0.028,  0.0974, ...]  ← delta up to 0.18 rad/step
 ```
+
+**Patch infrastructure (28 May 2026):**
+- `scripts/patch_mws_dimos.py` — idempotent patch runner, applied before every `docker compose up`
+- `PATCHES.md` — full documentation of external code changes
+- Patch 1: g1_sim.py arm-in-support-mode → arms move during startup wrench phase
+- Patch 2: unifolm attention.py → removes xformers assert, enables vanilla attention
+- Patch 3: g1_sim.py kinematic-robot → `fix_root_link=True` when `G1_KINEMATIC_ROBOT=1`
+
+**Scene system (28 May 2026):**
+- `scene_config.yaml` — object positions (cm) + physics config for mws_office.usdz
+- `scripts/patch_scene.py` — edits USD inside USDZ in-place (tmpdir), no loose .usd ever left on disk
+- Runs automatically in `deploy.sh` step 3; `G1_KINEMATIC_ROBOT=1` default in compose.yml
 
 ---
 
@@ -53,7 +68,7 @@ Isaac Sim 5.1
    │             fallback: /tmp/isaac_frame.png
    │             → resize 320×512 → norm (x/255-0.5)*2 → [-1,1]
    │
-   ├── 2. Стейт: state.q[:14]  (14-DOF G1 arms)
+   ├── 2. Стейт: state.q[14:28]  (14-DOF G1 arms, slots 14-27)
    │             pad → [16] zeros → min-max norm → [-1,1]
    │             (stats: unitree_g1_pack_camera/meta_data/stats.safetensors)
    │
@@ -70,7 +85,7 @@ Isaac Sim 5.1
    ├── 6. trim [:, :14]  → action_traj [16,14]
    └── 7. temporal_ensemble()  → сглаженные действия
           │
-          ▼  (пока только логирование, DDS publish — следующий шаг)
+          ▼  rt/lowcmd → Isaac Sim (arm_q[14:28], LEG hold, gripper passive)
    Recording:
    ├── model_output/output_*.mp4
    ├── robot_camera/camera_*.png
@@ -86,9 +101,15 @@ Isaac Sim 5.1
 wam-stack/
 ├── CLAUDE.md                    ← этот файл
 ├── README.md                    ← полная документация
+├── PATCHES.md                   ← документация всех патчей внешнего кода
 ├── UNIFOLM_DEPLOYMENT.md        ← деплой и troubleshooting модели
+├── scene_config.yaml            ← позиции объектов сцены (cm) + физика
 ├── compose.yml                  ← Docker Compose: sim-isaac + wam
 ├── docker/wam/Dockerfile        ← WAM контейнер
+├── scripts/
+│   ├── deploy.sh                ← деплой: патчи → compose up → restart sim-isaac
+│   ├── patch_mws_dimos.py       ← идемпотентный патч-runner для mws-dimos/unifolm
+│   └── patch_scene.py           ← правит USD внутри USDZ (tmpdir), без loose .usd
 ├── src/                         ← bind-mount → /workspace/wam
 │   ├── main.py                  ← control loop 10 Hz
 │   ├── dds_interface.py         ← DDS subscriber
@@ -195,6 +216,22 @@ Unnorm **до** обрезки до 14 DOF — иначе stats dims не сов
 
 Shared memory volume `sim_bridge_shm` пробрасывается в оба контейнера (`sim-isaac` и `wam`) через `/run/mws`. Именно через него D435i симулированная камера доступна WAM контейнеру.
 
+**Env vars sim-isaac:**
+- `G1_KINEMATIC_ROBOT=1` (default) — `fix_root_link=True`: корень таза закреплён в spawn,
+  суставы управляются PD-контроллером по командам WAM, коллизии активны.
+  Робот никогда не падает, рукой можно взаимодействовать с кубом/коробкой.
+- `G1_KINEMATIC_ROBOT=0` — обычная физика + startup support wrench (для тестирования GEAR-SONIC).
+
+### scene_config.yaml
+
+Объекты сцены `mws_office.usdz`. Единицы — **сантиметры** (metersPerUnit=0.01, Y-up).
+
+```yaml
+# Значение из Isaac Sim Properties (в метрах) → умножить на 100 → получишь значение здесь
+```
+
+Изменения вступают в силу после `bash scripts/deploy.sh` (или `python3 scripts/patch_scene.py && docker compose restart sim-isaac`).
+
 ---
 
 ## Сервер
@@ -265,8 +302,8 @@ find /root/skurchev/workspace/wam-stack/media -type f -delete
 ## Следующие шаги
 
 ### Краткосрочно
-1. **Publish actions via DDS** — добавить в `main.py` отправку `action_traj[0]` через `dds.publish_lowcmd()`
-2. **Собрать датасет** — ~400 сэмплов на активность в Isaac Sim
+1. ✅ ~~**Publish actions via DDS**~~ — `dds.publish_lowcmd()` работает, руки движутся (28 May 2026)
+2. **Собрать датасет** — ~400 сэмплов на активность в Isaac Sim (СЛЕДУЮЩИЙ ШАГ)
 
 ### Среднесрочно
 1. **Fine-tune** UnifoLM на собранных данных G1

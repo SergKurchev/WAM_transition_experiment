@@ -53,6 +53,19 @@ def _stub_model(state):
 
 CONTROL_HZ = 10   # command publish rate
 
+# Initial arm pose sent before model inference starts.
+# G1 arm joints in MuJoCo order (14-27): left arm [0:7], right arm [7:14]
+#   idx 0/7  : shoulder pitch  (+forward)
+#   idx 1/8  : shoulder roll   (left: +out, right: -out)
+#   idx 2/9  : shoulder yaw
+#   idx 3/10 : elbow           (+bend)
+#   idx 4-6 / 11-13 : wrist roll/pitch/yaw
+INIT_ARM_Q = [
+    0.3,  0.2,  0.0,  1.2,  0.0,  0.0,  0.0,   # left arm
+    0.3, -0.2,  0.0,  1.2,  0.0,  0.0,  0.0,   # right arm
+]
+INIT_POSE_SECONDS = 300.0  # hold init pose before model takes over
+
 
 def main():
     model_name = os.environ.get("WAM_MODEL", "stub")
@@ -81,6 +94,20 @@ def main():
         time.sleep(0.1)
 
     print(f"[WAM] rt/lowstate received  ({time.time() - wait_start:.1f}s wait). Control loop starting at {CONTROL_HZ} Hz.", flush=True)
+
+    # ── Move to initial bent-elbow pose before inference starts ──────────────
+    print(f"[WAM] Moving to init pose (bent elbows) for {INIT_POSE_SECONDS:.0f}s...", flush=True)
+    init_end = time.time() + INIT_POSE_SECONDS
+    last_log = time.time()
+    while time.time() < init_end:
+        dds.publish_lowcmd(INIT_ARM_Q)
+        now = time.time()
+        if now - last_log >= 30.0:
+            remaining = int(init_end - now)
+            print(f"[WAM] init pose holding... {remaining}s until inference", flush=True)
+            last_log = now
+        time.sleep(1.0 / CONTROL_HZ)
+    print("[WAM] Init pose done. Starting inference.", flush=True)
 
     dt = 1.0 / CONTROL_HZ
     loop_count = 0
@@ -132,12 +159,21 @@ def main():
                 action_0_norm  = 0.0
                 action_traj_norm = 0.0
 
+            # ── 5. Публикуем joint targets → Isaac Sim (rt/lowcmd) ───────────
+            # Руки в lowstate: joints 14-27 (left arm 14-20, right arm 21-27).
+            if action_traj is not None and action_0_norm > 0:
+                # Командуем 14-DOF руки первым шагом траектории (рад)
+                dds.publish_lowcmd(action_0.tolist())
+            elif state is not None:
+                # Модель ещё не прогрелась — держим руки в текущей позиции
+                dds.publish_lowcmd(list(state.q[14:28]))
+
             # CSV лог
             recorder.save_command(loop_count, action_0_norm, action_traj_norm)
 
             loop_count += 1
 
-            # ── 5. Периодический status-print ─────────────────────────────
+            # ── 6. Периодический status-print ─────────────────────────────
             now = time.time()
             if now - last_status_t >= STATUS_LOG_INTERVAL:
                 age = now - state.timestamp
