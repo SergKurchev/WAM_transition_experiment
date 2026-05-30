@@ -39,6 +39,42 @@ services:
       retries: 60
       start_period: 120s
 
+  lingbot-server:
+    build:
+      context: .
+      dockerfile: docker/lingbot/Dockerfile
+    image: lingbot-va-server:latest
+    container_name: lingbot-server
+    network_mode: host
+    volumes:
+      - /root/skurchev/workspace/wam-stack/repos/lingbot-va:/workspace/lingbot-va:ro
+      - /root/skurchev/workspace/wam-stack/checkpoints/lingbot:/workspace/checkpoints/lingbot:ro
+      - /root/skurchev/workspace/hf_cache:/root/.cache/huggingface:rw
+      - sim_bridge_shm:/run/mws
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONPATH=/workspace/lingbot-va
+      - PYTHONUNBUFFERED=1
+      - LINGBOT_CHECKPOINT=${LINGBOT_CHECKPOINT:-/workspace/checkpoints/lingbot/lingbot-vla-posttrain-robotwin}
+      - LINGBOT_PORT=${LINGBOT_PORT:-29056}
+      - LINGBOT_CONFIG=${LINGBOT_CONFIG:-robotwin}
+    working_dir: /workspace/lingbot-va
+    command: >
+      python -m torch.distributed.run
+      --nproc_per_node=1
+      --master_port=29061
+      -m wan_va.wan_va_server
+      --config-name ${LINGBOT_CONFIG:-robotwin}
+      --port ${LINGBOT_PORT:-29056}
+      --save_root /tmp/lingbot_vis/
+    runtime: nvidia
+    shm_size: '8gb'
+    stdin_open: true
+    tty: true
+    profiles:
+      - lingbot
+
   wam:
     build:
       context: .
@@ -64,6 +100,11 @@ services:
       - WAM_PROMPT=${WAM_PROMPT:-pick and place green cube in white basket}
       - WAM_MEDIA_DIR=${WAM_MEDIA_DIR:-/workspace/wam/media}
       - DDS_IFACE=lo
+      # LingBot-VA client settings (only used when WAM_MODEL=lingbot)
+      - LINGBOT_HOST=${LINGBOT_HOST:-127.0.0.1}
+      - LINGBOT_PORT=${LINGBOT_PORT:-29056}
+      - LINGBOT_USE_IK=${LINGBOT_USE_IK:-0}
+      - LINGBOT_URDF=${LINGBOT_URDF:-}
     runtime: nvidia
     shm_size: '4gb'
     stdin_open: true

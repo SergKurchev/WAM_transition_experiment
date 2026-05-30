@@ -5,7 +5,7 @@ Runs a control loop:
   2. Run WAM model inference → trajectory predictions (16, 14).
   3. Record model outputs: action trajectories, state predictions, video frames.
 
-To swap models set WAM_MODEL env var: unifolm | eva
+To swap models set WAM_MODEL env var: unifolm | lingbot | eva
 """
 
 import os
@@ -35,13 +35,19 @@ def load_model(name: str, checkpoint: str | None, prompt: str | None = None):
     if name == "unifolm":
         from models.unifolm import UnifoLMModel
         return UnifoLMModel(checkpoint, prompt=prompt)
+    elif name == "lingbot":
+        from models.lingbot import LingBotVAModel
+        use_ik = os.environ.get("LINGBOT_USE_IK", "0") == "1"
+        urdf_path = os.environ.get("LINGBOT_URDF", "")
+        return LingBotVAModel(prompt=prompt or "pick and place green cube in white basket",
+                              use_ik=use_ik, urdf_path=urdf_path)
     elif name == "eva":
         from models.eva import EVAModel
         return EVAModel(checkpoint)
     elif name == "stub":
         return _stub_model
     else:
-        raise ValueError(f"Unknown WAM_MODEL: {name!r}. Set to 'unifolm', 'eva', or 'stub'.")
+        raise ValueError(f"Unknown WAM_MODEL: {name!r}. Set to 'unifolm', 'lingbot', 'eva', or 'stub'.")
 
 
 def _stub_model(state):
