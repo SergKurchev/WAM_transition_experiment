@@ -45,7 +45,9 @@ log = logging.getLogger(__name__)
 
 SERVER_HOST = os.environ.get("LINGBOT_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("LINGBOT_PORT", "29056"))
-CAMERA_SHM_PATH = "/run/mws/camera.rgb"
+CAMERA_SHM_PATH       = "/run/mws/camera.rgb"
+CAMERA_LEFT_WRIST_SHM = "/run/mws/camera_left_wrist.rgb"
+CAMERA_RIGHT_WRIST_SHM = "/run/mws/camera_right_wrist.rgb"
 CAMERA_W, CAMERA_H = 1280, 720
 MODEL_W, MODEL_H = 320, 256         # robotwin config: width=320, height=256
 G1_ARM_DOF = 14                     # arm slots 14..27 in rt/lowcmd
@@ -193,28 +195,45 @@ class LingBotVAModel:
 
     # ── observation building ─────────────────────────────────────────────────
 
+    def _read_cam(self, shm_path: str) -> Optional[np.ndarray]:
+        """Read one camera frame from SHM; returns None on failure."""
+        if not os.path.exists(shm_path):
+            return None
+        try:
+            with open(shm_path, "rb") as f:
+                raw = f.read(CAMERA_W * CAMERA_H * 3)
+            if len(raw) < CAMERA_W * CAMERA_H * 3:
+                return None
+            return np.frombuffer(raw, dtype=np.uint8).reshape(CAMERA_H, CAMERA_W, 3).copy()
+        except Exception:
+            return None
+
     def _get_obs_images(self) -> dict[str, np.ndarray]:
-        """Read head camera from SHM; duplicate as wrist placeholder."""
-        frame = _read_shm_frame()
-        if frame is None:
-            if self._cached_frame is not None:
-                frame = self._cached_frame
-                log.debug("[LingBot] SHM unavailable — using cached frame")
-            else:
-                log.warning("[LingBot] No camera frame available — using zeros")
-                frame = np.zeros((MODEL_H, MODEL_W, 3), dtype=np.uint8)
+        """Read head + wrist cameras from SHM. Falls back to cached/zeros."""
+        head_raw = _read_shm_frame()
+        left_raw  = self._read_cam(CAMERA_LEFT_WRIST_SHM)
+        right_raw = self._read_cam(CAMERA_RIGHT_WRIST_SHM)
+
+        # Fallback: use head camera for any missing wrist camera
+        if head_raw is None:
+            head_raw = self._cached_frame or np.zeros((CAMERA_H, CAMERA_W, 3), dtype=np.uint8)
         else:
-            self._cached_frame = frame
+            self._cached_frame = head_raw
 
-        head = _resize_frame(frame, MODEL_W, MODEL_H)  # [H, W, 3]
-        head_chw = head.transpose(2, 0, 1)[None]        # [1, 3, H, W] uint8
+        if left_raw is None:
+            log.debug("[LingBot] left wrist SHM not ready — using head cam")
+            left_raw = head_raw
+        if right_raw is None:
+            log.debug("[LingBot] right wrist SHM not ready — using head cam")
+            right_raw = head_raw
 
-        # Wrist cameras: duplicated head until real wrist SHMs are added.
-        # TODO: replace with actual wrist SHM paths once added to Isaac Sim.
+        def to_chw(frame: np.ndarray) -> np.ndarray:
+            return _resize_frame(frame, MODEL_W, MODEL_H).transpose(2, 0, 1)[None]
+
         return {
-            "observation.images.cam_high":        head_chw,
-            "observation.images.cam_left_wrist":  head_chw,
-            "observation.images.cam_right_wrist": head_chw,
+            "observation.images.cam_high":        to_chw(head_raw),
+            "observation.images.cam_left_wrist":  to_chw(left_raw),
+            "observation.images.cam_right_wrist": to_chw(right_raw),
         }
 
     def _build_state(self, arm_q: np.ndarray) -> np.ndarray:

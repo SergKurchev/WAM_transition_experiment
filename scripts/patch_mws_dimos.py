@@ -147,6 +147,332 @@ PATCHES: list[dict] = [
         # old_missing_ok lets the script treat that case as already-done.
         "old_missing_ok": True,
     },
+
+    # ── Patch 4: wrist camera CameraCfg fields in G1SceneCfg ────────────────
+    # Adds two CameraCfg sensors (left_wrist_yaw_link / right_wrist_yaw_link)
+    # to G1SceneCfg so Isaac Lab spawns camera prims on both wrists.
+    # These cameras are consumed by Patches 5-7 and published to SHM by Patch 9.
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Add camera_left_wrist and camera_right_wrist CameraCfg to G1SceneCfg",
+        "sentinel": "# ── WAM-patch: wrist-cameras-cfg",
+        "old": (
+            "        offset=CameraCfg.OffsetCfg(),\n"
+            "    )\n"
+            "    # Unitree G1 uses a Livox MID-360 at the head."
+        ),
+        "new": (
+            "        offset=CameraCfg.OffsetCfg(),\n"
+            "    )\n"
+            "    # ── WAM-patch: wrist-cameras-cfg ─────────────────────────────────\n"
+            "    # Applied by wam-stack/scripts/patch_mws_dimos.py (Patch 4).\n"
+            "    # Wrist cameras for LingBot-VA 3-camera obs: head + L/R wrist.\n"
+            "    # rot=(w,x,y,z): 90° around Y → camera looks along link +X (arm axis).\n"
+            "    # Tune pos/rot in scene_config.yaml after visual verification in noVNC.\n"
+            "    camera_left_wrist: CameraCfg = CameraCfg(\n"
+            "        prim_path=\"/World/envs/env_.*/Robot/left_wrist_yaw_link/camera_left_wrist\",\n"
+            "        update_period=1.0 / _D435I_FPS,\n"
+            "        height=_D435I_HEIGHT,\n"
+            "        width=_D435I_WIDTH,\n"
+            "        data_types=[\"rgb\"],\n"
+            "        spawn=PinholeCameraCfg(\n"
+            "            focal_length=_CAMERA_FOCAL_LENGTH_MM,\n"
+            "            focus_distance=400.0,\n"
+            "            horizontal_aperture=_pinhole_horizontal_aperture(\n"
+            "                _CAMERA_FOCAL_LENGTH_MM,\n"
+            "                _D435I_HORIZONTAL_FOV_DEG,\n"
+            "            ),\n"
+            "            clipping_range=(0.02, 5.0),\n"
+            "        ),\n"
+            "        offset=CameraCfg.OffsetCfg(\n"
+            "            pos=(0.06, 0.0, 0.0),\n"
+            "            rot=(0.7071, 0.0, 0.7071, 0.0),\n"
+            "        ),\n"
+            "    )\n"
+            "    camera_right_wrist: CameraCfg = CameraCfg(\n"
+            "        prim_path=\"/World/envs/env_.*/Robot/right_wrist_yaw_link/camera_right_wrist\",\n"
+            "        update_period=1.0 / _D435I_FPS,\n"
+            "        height=_D435I_HEIGHT,\n"
+            "        width=_D435I_WIDTH,\n"
+            "        data_types=[\"rgb\"],\n"
+            "        spawn=PinholeCameraCfg(\n"
+            "            focal_length=_CAMERA_FOCAL_LENGTH_MM,\n"
+            "            focus_distance=400.0,\n"
+            "            horizontal_aperture=_pinhole_horizontal_aperture(\n"
+            "                _CAMERA_FOCAL_LENGTH_MM,\n"
+            "                _D435I_HORIZONTAL_FOV_DEG,\n"
+            "            ),\n"
+            "            clipping_range=(0.02, 5.0),\n"
+            "        ),\n"
+            "        offset=CameraCfg.OffsetCfg(\n"
+            "            pos=(0.06, 0.0, 0.0),\n"
+            "            rot=(0.7071, 0.0, 0.7071, 0.0),\n"
+            "        ),\n"
+            "    )\n"
+            "    # ─────────────────────────────────────────────────────────────────\n"
+            "    # Unitree G1 uses a Livox MID-360 at the head."
+        ),
+    },
+
+    # ── Patch 5: acquire wrist sensors in run() ──────────────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Acquire camera_left_wrist / camera_right_wrist from scene.sensors",
+        "sentinel": "# ── WAM-patch: wrist-cameras-acquire",
+        "old": (
+            "    camera_sensor = scene.sensors[\"camera\"]\n"
+            "    ray_caster_sensor = scene.sensors[\"ray_caster\"]\n"
+            "    _probe(\"camera and ray_caster sensors acquired\")"
+        ),
+        "new": (
+            "    camera_sensor = scene.sensors[\"camera\"]\n"
+            "    ray_caster_sensor = scene.sensors[\"ray_caster\"]\n"
+            "    # ── WAM-patch: wrist-cameras-acquire ─────────────────────────────\n"
+            "    left_wrist_cam = scene.sensors.get(\"camera_left_wrist\")\n"
+            "    right_wrist_cam = scene.sensors.get(\"camera_right_wrist\")\n"
+            "    # ─────────────────────────────────────────────────────────────────\n"
+            "    _probe(\"camera and ray_caster sensors acquired\")"
+        ),
+    },
+
+    # ── Patch 6: configure wrist cameras in bridge setup ─────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Call bridge.configure_wrist_cameras_export() after head cam configure",
+        "sentinel": "# ── WAM-patch: wrist-cameras-configure",
+        "old": (
+            "    bridge.configure_camera_export(camera_sensor)\n"
+            "    _probe(\"creating IsaacStartupSupport\")"
+        ),
+        "new": (
+            "    bridge.configure_camera_export(camera_sensor)\n"
+            "    # ── WAM-patch: wrist-cameras-configure ───────────────────────────\n"
+            "    if left_wrist_cam is not None and right_wrist_cam is not None:\n"
+            "        bridge.configure_wrist_cameras_export(left_wrist_cam, right_wrist_cam)\n"
+            "    # ─────────────────────────────────────────────────────────────────\n"
+            "    _probe(\"creating IsaacStartupSupport\")"
+        ),
+    },
+
+    # ── Patch 7: publish wrist cameras in render loop ────────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Call bridge.publish_wrist_cameras() alongside publish_camera()",
+        "sentinel": "# ── WAM-patch: wrist-cameras-publish",
+        "old": (
+            "                if _render_for_camera:\n"
+            "                    bridge.publish_camera(sim_time=sim.current_time)"
+        ),
+        "new": (
+            "                if _render_for_camera:\n"
+            "                    bridge.publish_camera(sim_time=sim.current_time)\n"
+            "                    # ── WAM-patch: wrist-cameras-publish ─────────────\n"
+            "                    bridge.publish_wrist_cameras(sim_time=sim.current_time)\n"
+            "                    # ─────────────────────────────────────────────────"
+        ),
+    },
+
+    # ── Patch 8: wrist SHM constants in dds_bridge.py ────────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/dds_bridge.py",
+        "description": "Add _CAMERA_LEFT/RIGHT_WRIST_SHM_PATH constants to dds_bridge.py",
+        "sentinel": "# ── WAM-patch: wrist-cameras-shm-constants",
+        "old": (
+            "_CAMERA_SHM_SIZE: int = 1280 * 720 * 3  # D435i rgb8 at configured camera resolution\n"
+            "_LIDAR_SHM_PATH: str = \"/run/mws/lidar.xyzi\""
+        ),
+        "new": (
+            "_CAMERA_SHM_SIZE: int = 1280 * 720 * 3  # D435i rgb8 at configured camera resolution\n"
+            "# ── WAM-patch: wrist-cameras-shm-constants ──────────────────────────────\n"
+            "# Applied by wam-stack/scripts/patch_mws_dimos.py (Patch 8).\n"
+            "_CAMERA_LEFT_WRIST_SHM_PATH: str = \"/run/mws/camera_left_wrist.rgb\"\n"
+            "_CAMERA_RIGHT_WRIST_SHM_PATH: str = \"/run/mws/camera_right_wrist.rgb\"\n"
+            "_CAMERA_WRIST_SHM_SIZE: int = 1280 * 720 * 3\n"
+            "# ─────────────────────────────────────────────────────────────────────────\n"
+            "_LIDAR_SHM_PATH: str = \"/run/mws/lidar.xyzi\""
+        ),
+    },
+
+    # ── Patch 9: wrist SHM members in __init__ ───────────────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/dds_bridge.py",
+        "description": "Add wrist SHM and annotator members to IsaacDdsBridge.__init__",
+        "sentinel": "# ── WAM-patch: wrist-cameras-members",
+        "old": (
+            "        self._lidar_shm: Optional[mmap.mmap] = None\n"
+            "        self._lidar_signal_seq: int = 0"
+        ),
+        "new": (
+            "        self._lidar_shm: Optional[mmap.mmap] = None\n"
+            "        # ── WAM-patch: wrist-cameras-members ─────────────────────────\n"
+            "        self._left_wrist_shm: Optional[mmap.mmap] = None\n"
+            "        self._right_wrist_shm: Optional[mmap.mmap] = None\n"
+            "        self._left_wrist_annotator: Any | None = None\n"
+            "        self._right_wrist_annotator: Any | None = None\n"
+            "        self._left_wrist_render_product_path: str | None = None\n"
+            "        self._right_wrist_render_product_path: str | None = None\n"
+            "        # ─────────────────────────────────────────────────────────────\n"
+            "        self._lidar_signal_seq: int = 0"
+        ),
+    },
+
+    # ── Patch 10: initialize wrist SHMs in start() ───────────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/dds_bridge.py",
+        "description": "Open wrist SHM files in IsaacDdsBridge.start()",
+        "sentinel": "# ── WAM-patch: wrist-cameras-start",
+        "old": (
+            "        self._camera_shm = self._open_shm_file(_CAMERA_SHM_PATH, _CAMERA_SHM_SIZE)\n"
+            "\n"
+            "        self._camera_puber = ChannelPublisher(\"rt/camera/signal\", CameraSignal_)"
+        ),
+        "new": (
+            "        self._camera_shm = self._open_shm_file(_CAMERA_SHM_PATH, _CAMERA_SHM_SIZE)\n"
+            "        # ── WAM-patch: wrist-cameras-start ───────────────────────────\n"
+            "        self._left_wrist_shm = self._open_shm_file(\n"
+            "            _CAMERA_LEFT_WRIST_SHM_PATH, _CAMERA_WRIST_SHM_SIZE)\n"
+            "        self._right_wrist_shm = self._open_shm_file(\n"
+            "            _CAMERA_RIGHT_WRIST_SHM_PATH, _CAMERA_WRIST_SHM_SIZE)\n"
+            "        # ─────────────────────────────────────────────────────────────\n"
+            "\n"
+            "        self._camera_puber = ChannelPublisher(\"rt/camera/signal\", CameraSignal_)"
+        ),
+    },
+
+    # ── Patch 11: close wrist SHMs in close() ────────────────────────────────
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/dds_bridge.py",
+        "description": "Close and unlink wrist SHM files in IsaacDdsBridge.close()",
+        "sentinel": "# ── WAM-patch: wrist-cameras-close",
+        "old": (
+            "        if self._camera_shm is not None:\n"
+            "            try:\n"
+            "                self._camera_shm.close()\n"
+            "            except Exception:\n"
+            "                pass\n"
+            "            try:\n"
+            "                os.unlink(_CAMERA_SHM_PATH)\n"
+            "            except OSError:\n"
+            "                pass\n"
+            "        if self._lidar_shm is not None:"
+        ),
+        "new": (
+            "        if self._camera_shm is not None:\n"
+            "            try:\n"
+            "                self._camera_shm.close()\n"
+            "            except Exception:\n"
+            "                pass\n"
+            "            try:\n"
+            "                os.unlink(_CAMERA_SHM_PATH)\n"
+            "            except OSError:\n"
+            "                pass\n"
+            "        # ── WAM-patch: wrist-cameras-close ───────────────────────────\n"
+            "        for _wrist_shm, _wrist_path in [\n"
+            "            (self._left_wrist_shm, _CAMERA_LEFT_WRIST_SHM_PATH),\n"
+            "            (self._right_wrist_shm, _CAMERA_RIGHT_WRIST_SHM_PATH),\n"
+            "        ]:\n"
+            "            if _wrist_shm is not None:\n"
+            "                try:\n"
+            "                    _wrist_shm.close()\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "                try:\n"
+            "                    os.unlink(_wrist_path)\n"
+            "                except OSError:\n"
+            "                    pass\n"
+            "        for _ann, _path in [\n"
+            "            (self._left_wrist_annotator, self._left_wrist_render_product_path),\n"
+            "            (self._right_wrist_annotator, self._right_wrist_render_product_path),\n"
+            "        ]:\n"
+            "            if _ann is not None:\n"
+            "                try:\n"
+            "                    if _path is not None:\n"
+            "                        _ann.detach([_path])\n"
+            "                    else:\n"
+            "                        _ann.detach()\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "        # ─────────────────────────────────────────────────────────────\n"
+            "        if self._lidar_shm is not None:"
+        ),
+    },
+
+    # ── Patch 12: configure_wrist_cameras_export() and publish_wrist_cameras() ─
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/dds_bridge.py",
+        "description": (
+            "Add configure_wrist_cameras_export() and publish_wrist_cameras() "
+            "to IsaacDdsBridge"
+        ),
+        "sentinel": "# ── WAM-patch: wrist-cameras-methods",
+        "old": "    def read_cmd(",
+        "new": (
+            "    def configure_wrist_cameras_export(\n"
+            "        self, left_cam: Any, right_cam: Any\n"
+            "    ) -> None:\n"
+            "        \"\"\"Attach CPU RGB annotators to left and right wrist camera render products.\n"
+            "\n"
+            "        # ── WAM-patch: wrist-cameras-methods ─────────────────────────\n"
+            "        # Applied by wam-stack/scripts/patch_mws_dimos.py (Patch 12).\n"
+            "        \"\"\"\n"
+            "        import omni.replicator.core as rep\n"
+            "\n"
+            "        for cam, attr_ann, attr_path in [\n"
+            "            (left_cam,  \"_left_wrist_annotator\",  \"_left_wrist_render_product_path\"),\n"
+            "            (right_cam, \"_right_wrist_annotator\", \"_right_wrist_render_product_path\"),\n"
+            "        ]:\n"
+            "            rpp = list(cam.render_product_paths)\n"
+            "            if len(rpp) != 1:\n"
+            "                print(f\"[dds_bridge] wrist cam expected 1 render product, got {len(rpp)}\",\n"
+            "                      flush=True)\n"
+            "                continue\n"
+            "            rp = rpp[0]\n"
+            "            ann = rep.AnnotatorRegistry.get_annotator(\"rgb\", device=\"cpu\")\n"
+            "            ann.attach(rp)\n"
+            "            setattr(self, attr_ann, ann)\n"
+            "            setattr(self, attr_path, rp)\n"
+            "\n"
+            "    def _read_wrist_rgb(self, annotator: Any) -> Optional[np.ndarray]:\n"
+            "        \"\"\"Read RGB from a wrist camera annotator; returns None on failure.\"\"\"\n"
+            "        output = annotator.get_data(device=\"cpu\")\n"
+            "        if output is None:\n"
+            "            return None\n"
+            "        rgb = output[\"data\"] if isinstance(output, dict) else output\n"
+            "        if rgb is None:\n"
+            "            return None\n"
+            "        rgb_np = np.asarray(rgb, dtype=np.uint8)\n"
+            "        if rgb_np.size == 0:\n"
+            "            return None\n"
+            "        if rgb_np.ndim == 4:\n"
+            "            rgb_np = rgb_np[0]\n"
+            "        if rgb_np.ndim != 3:\n"
+            "            return None\n"
+            "        return np.ascontiguousarray(rgb_np[..., :3])\n"
+            "\n"
+            "    def publish_wrist_cameras(self, sim_time: float) -> None:\n"
+            "        \"\"\"Write left and right wrist camera RGB to SHM.\n"
+            "\n"
+            "        No DDS signal is published — WAM reads the SHM directly.\n"
+            "        No-op if wrist cameras were not configured.\n"
+            "        \"\"\"\n"
+            "        for ann, shm in [\n"
+            "            (self._left_wrist_annotator,  self._left_wrist_shm),\n"
+            "            (self._right_wrist_annotator, self._right_wrist_shm),\n"
+            "        ]:\n"
+            "            if ann is None or shm is None:\n"
+            "                continue\n"
+            "            try:\n"
+            "                rgb_np = self._read_wrist_rgb(ann)\n"
+            "                if rgb_np is None:\n"
+            "                    continue\n"
+            "                shm.seek(0)\n"
+            "                shm.write(rgb_np.tobytes())\n"
+            "            except Exception as exc:\n"
+            "                print(f\"[dds_bridge] wrist camera publish failed: {exc}\", flush=True)\n"
+            "\n"
+            "    def read_cmd("
+        ),
+    },
 ]
 
 
