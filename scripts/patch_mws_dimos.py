@@ -155,7 +155,7 @@ PATCHES: list[dict] = [
     {
         "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
         "description": "Add camera_left_wrist and camera_right_wrist CameraCfg to G1SceneCfg",
-        "sentinel": "# ── WAM-patch: wrist-cameras-cfg",
+        "sentinel": "# ── WAM-patch: wrist-cameras-cfg-v3",
         "old": (
             "        offset=CameraCfg.OffsetCfg(),\n"
             "    )\n"
@@ -164,11 +164,17 @@ PATCHES: list[dict] = [
         "new": (
             "        offset=CameraCfg.OffsetCfg(),\n"
             "    )\n"
-            "    # ── WAM-patch: wrist-cameras-cfg ─────────────────────────────────\n"
+            "    # ── WAM-patch: wrist-cameras-cfg-v3 ──────────────────────────────\n"
             "    # Applied by wam-stack/scripts/patch_mws_dimos.py (Patch 4).\n"
-            "    # Wrist cameras for LingBot-VA 3-camera obs: head + L/R wrist.\n"
-            "    # rot=(w,x,y,z): 90° around Y → camera looks along link +X (arm axis).\n"
-            "    # Tune pos/rot in scene_config.yaml after visual verification in noVNC.\n"
+            "    # Wrist cameras for LingBot-VA 3-camera observation.\n"
+            "    #\n"
+            "    # Derived from diagnostic captures (30 May 2026):\n"
+            "    #   identity rot=(1,0,0,0)  → camera -Z = parent -Z = world DOWN\n"
+            "    #     → grey ground plane visible  → camera IS at wrist position ✓\n"
+            "    #   fingers extend along parent +X  (palm_link offset +0.041 X)\n"
+            "    #   rot=(0.7071,0,-0.7071,0) = -90° around Y (OpenGL):\n"
+            "    #     camera -Z  →  parent +X  →  toward fingers / workspace\n"
+            "    #   pos=(0.06,0,0) pushes 6 cm along arm axis away from wrist centre.\n"
             "    camera_left_wrist: CameraCfg = CameraCfg(\n"
             "        prim_path=\"/World/envs/env_.*/Robot/left_wrist_yaw_link/camera_left_wrist\",\n"
             "        update_period=1.0 / _D435I_FPS,\n"
@@ -186,7 +192,7 @@ PATCHES: list[dict] = [
             "        ),\n"
             "        offset=CameraCfg.OffsetCfg(\n"
             "            pos=(0.06, 0.0, 0.0),\n"
-            "            rot=(0.7071, 0.0, 0.7071, 0.0),\n"
+            "            rot=(0.7071, 0.0, -0.7071, 0.0),\n"
             "        ),\n"
             "    )\n"
             "    camera_right_wrist: CameraCfg = CameraCfg(\n"
@@ -206,7 +212,7 @@ PATCHES: list[dict] = [
             "        ),\n"
             "        offset=CameraCfg.OffsetCfg(\n"
             "            pos=(0.06, 0.0, 0.0),\n"
-            "            rot=(0.7071, 0.0, 0.7071, 0.0),\n"
+            "            rot=(0.7071, 0.0, -0.7071, 0.0),\n"
             "        ),\n"
             "    )\n"
             "    # ─────────────────────────────────────────────────────────────────\n"
