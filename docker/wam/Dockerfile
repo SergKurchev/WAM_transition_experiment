@@ -96,6 +96,8 @@ RUN pip install --no-cache-dir \
     "fairscale==0.4.13" \
     "draccus==0.11.5"
 
+RUN pip install --no-cache-dir h5py pandas matplotlib
+
 # /workspace/wam      — your model code (bind-mounted, hot-reload)
 # /workspace/unitree_sdk2py_src — DDS SDK (bind-mounted read-only)
 # /workspace/unifolm — unifolm_wma repo (bind-mounted from repos/unifolm)

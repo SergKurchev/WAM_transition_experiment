@@ -50,6 +50,17 @@
 - `scripts/patch_scene.py` — edits USD inside USDZ in-place (tmpdir), no loose .usd ever left on disk
 - Runs automatically in `deploy.sh` step 3; `G1_KINEMATIC_ROBOT=1` default in compose.yml
 
+**Итерация по сцене (быстро менять позиции куба/коробки):**
+
+| Что нужно | Команда | Время |
+|-----------|---------|-------|
+| Сбросить робота в spawn-позицию | `bash scripts/reset_sim.sh` | мгновенно (ZMQ) |
+| Применить новые позиции куба/коробки из `scene_config.yaml` | `bash scripts/update_scene.sh` | ~2-3 мин (перезапуск Isaac Sim) |
+| Применить сцену без rsync (если редактировал на сервере) | `bash scripts/update_scene.sh --server-only` | ~2-3 мин |
+
+Почему нельзя быстрее для сцены: Isaac Sim загружает USDZ при старте, hot-reload не поддерживает.
+WAM inference при перезапуске sim-isaac **не затрагивается** и переподключается сам.
+
 ---
 
 ## Архитектура пайплайна
