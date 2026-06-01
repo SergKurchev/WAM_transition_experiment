@@ -10,11 +10,14 @@
 
 set -euo pipefail
 
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${_SCRIPT_DIR}/../.env" ] && source "${_SCRIPT_DIR}/../.env"
+
 SERVER_HOST="176.109.83.84"
 SERVER_PORT="2221"
 SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
-MWS_DIR="/root/skurchev/workspace/mws-dimos"
+MWS_DIR="${SERVER_WORKSPACE:-/root/skurchev/workspace}/mws-dimos"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'

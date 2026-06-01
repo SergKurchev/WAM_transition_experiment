@@ -20,10 +20,13 @@ set -e
 # Configuration
 # ============================================================================
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${SCRIPT_DIR}/../.env" ] && source "${SCRIPT_DIR}/../.env"
+
 SERVER_USER="root"
 SERVER_IP="176.109.83.84"
 SERVER_PORT="2221"
-SERVER_PATH="/root/skurchev/workspace/wam-stack"
+SERVER_PATH="${SERVER_WORKSPACE:-/root/skurchev/workspace}/wam-stack"
 LOCAL_KEY="$HOME/.ssh/id_ed25519"
 
 # Colors

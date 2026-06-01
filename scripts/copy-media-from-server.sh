@@ -23,11 +23,15 @@ set -e
 # Configuration
 # ============================================================================
 
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${_SCRIPT_DIR}/../.env" ] && source "${_SCRIPT_DIR}/../.env"
+_WS="${SERVER_WORKSPACE:-/root/skurchev/workspace}"
+
 SERVER_USER="root"
 SERVER_IP="176.109.83.84"
 SERVER_PORT="2221"
-SERVER_MEDIA_PATH="/root/skurchev/workspace/wam-stack/media"
-SERVER_SCENES_PATH="/root/skurchev/workspace/assets"
+SERVER_MEDIA_PATH="${_WS}/wam-stack/media"
+SERVER_SCENES_PATH="${_WS}/assets"
 LOCAL_KEY="$HOME/.ssh/id_ed25519"
 
 # Colors

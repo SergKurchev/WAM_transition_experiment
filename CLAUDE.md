@@ -234,6 +234,25 @@ Shared memory volume `sim_bridge_shm` пробрасывается в оба к�
 
 ---
 
+## Конфиг развёртывания
+
+**Файл:** `.env` в корне репо (единственное место для настройки пути).
+
+```bash
+# .env — правь под свой аккаунт на сервере
+SERVER_WORKSPACE=/root/skurchev/workspace
+```
+
+Переменная `SERVER_WORKSPACE` подхватывается автоматически:
+- `compose.yml` — Docker Compose читает `.env` из той же папки
+- Все `scripts/*.sh` — sourcing `.env` в начале скрипта
+- `scripts/patch_mws_dimos.py`, `export_scene_with_robot.py` и др. — через `os.environ.get("SERVER_WORKSPACE")`
+- `deploy.sh` — source + `export SERVER_WORKSPACE` для дочерних процессов
+
+При смене пользователя нужно изменить **только одну строку** в `.env`.
+
+---
+
 ## Сервер
 
 ```
@@ -244,7 +263,7 @@ Host x32-techgov-GPU-01
   IdentityFile ~/.ssh/id_ed25519
 ```
 
-**Workspace на сервере:** `/root/skurchev/workspace/`
+**Workspace на сервере:** `${SERVER_WORKSPACE}` (см. `.env`)
 
 ```bash
 # Стандартное подключение

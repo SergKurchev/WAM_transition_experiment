@@ -724,7 +724,7 @@ class UnifoLMModel:
             action_0_val = actions_ensemble[0, 0].cpu()
             self.action_history.append(action_0_val.float())
 
-            return action_traj, state_traj, video_output
+            return actions_ensemble[0], state_traj, video_output
 
         except Exception as e:
             print(f"[UnifoLM] FATAL ERROR: {e}", flush=True)

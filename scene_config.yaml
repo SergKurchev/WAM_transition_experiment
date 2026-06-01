@@ -16,9 +16,9 @@ usdz_path: /root/skurchev/workspace/assets/mws_office.usdz
 objects:
 
   # Green cube — pick target
-  # Sitting on ComicTable surface (~y=56 cm). x/z set relative to table.
+  # Sitting on ComicTable surface (~y=60 cm). x/z set relative to table.
   - path: /scene/objects/shapes/cube
-    translate: [-165.717, 54.052, -22.774]   # [x, y, z] in cm
+    translate: [-165.717, 60.052, -22.774]   # [x, y, z] in cm
     physics:
       rigid_body: true
       mass_kg: 0.3
@@ -27,7 +27,7 @@ objects:
 
   # White storage box — place target ("basket")
   - path: /scene/objects/boxes/Office_storage_box_canvas
-    translate: [-155.492, 55.892, 20.855]
+    translate: [-155.492, 60.892, 20.855]
     physics:
       rigid_body: true
       mass_kg: 0.5

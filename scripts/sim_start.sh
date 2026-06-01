@@ -8,11 +8,14 @@
 
 set -euo pipefail
 
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${_SCRIPT_DIR}/../.env" ] && source "${_SCRIPT_DIR}/../.env"
+
 SERVER_HOST="176.109.83.84"
 SERVER_PORT="2221"
 SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
-MWS_DIR="/root/skurchev/workspace/mws-dimos"
+MWS_DIR="${SERVER_WORKSPACE:-/root/skurchev/workspace}/mws-dimos"
 COMPOSE="$MWS_DIR/deploy/sim/ros2/compose.yml"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 LOCAL_NOVNC_PORT="6181"

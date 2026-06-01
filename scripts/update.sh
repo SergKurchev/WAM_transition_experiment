@@ -10,11 +10,14 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${_SCRIPT_DIR}/../.env" ] && source "${_SCRIPT_DIR}/../.env"
+
 SERVER_HOST="176.109.83.84"
 SERVER_PORT="2221"
 SERVER_USER="root"
 REMOTE="$SERVER_USER@$SERVER_HOST"
-REMOTE_DIR="/root/skurchev/workspace/wam-stack"
+REMOTE_DIR="${SERVER_WORKSPACE:-/root/skurchev/workspace}/wam-stack"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 # WSL fallback: key lives in Windows home, not Linux home
 if [ ! -f "$SSH_KEY" ]; then

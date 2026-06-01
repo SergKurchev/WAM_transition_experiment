@@ -10,6 +10,10 @@
 
 set -euo pipefail
 
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${_SCRIPT_DIR}/../.env" ] && source "${_SCRIPT_DIR}/../.env"
+_WS="${SERVER_WORKSPACE:-/root/skurchev/workspace}"
+
 SERVER_HOST="176.109.83.84"
 SERVER_PORT="2221"
 SERVER_USER="root"
@@ -49,5 +53,5 @@ echo "" >&2
 if [ "$(echo "$CONTAINERS" | wc -w)" -eq 1 ]; then
     $SSH "$REMOTE" "docker logs -f --tail=50 $CONTAINERS 2>&1"
 else
-    $SSH "$REMOTE" "cd /root/skurchev/workspace/wam-stack && docker compose logs -f --tail=20 2>&1"
+    $SSH "$REMOTE" "cd ${_WS}/wam-stack && docker compose logs -f --tail=20 2>&1"
 fi

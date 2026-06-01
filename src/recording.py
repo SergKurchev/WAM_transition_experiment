@@ -84,7 +84,7 @@ class MediaRecorder:
     def _step_dir(self, step: int) -> Path:
         """Вернуть (и создать) папку для шага step."""
         d = self.steps_dir / f"step_{step:06d}"
-        d.mkdir(exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _init_camera_shm(self) -> None:
@@ -166,13 +166,14 @@ class MediaRecorder:
             return None
 
     def save_model_output(self, step: int, video_output) -> str | None:
-        """Сохранить видео предсказание модели (выход модели).
+        """Сохранить видео предсказание модели.
 
-        Файл: steps/step_XXXXXX/model_output.mp4
-        Формат входа: тензор (B,C,T,H,W) или (C,T,H,W) в диапазоне [-1,1].
+        Файлы в steps/step_XXXXXX/:
+          model_output.mp4      — предсказанное видео (h264, 16 кадров, 10 fps)
+          model_output_cmp.mp4  — side-by-side: camera_input (статик) | предсказание
 
-        После сохранения запускает прунинг: оставляет первые KEEP_FIRST
-        и последние KEEP_LAST шагов, удаляет средние.
+        Формат входа: тензор (B,C,T,H,W) в диапазоне [-1,1].
+        Реализация совпадает с save_results() из real_eval_server.py.
         """
         if video_output is None:
             return None
@@ -180,48 +181,35 @@ class MediaRecorder:
         try:
             import cv2 as _cv2
             import torch
+            import torchvision
 
-            # 1. → float32 numpy
-            if isinstance(video_output, torch.Tensor):
-                arr = video_output.detach().cpu().float().numpy()
-            else:
-                arr = np.array(video_output, dtype=np.float32)
+            # 1. → torch (B,C,T,H,W) float, clamp [-1,1]
+            if not isinstance(video_output, torch.Tensor):
+                video_output = torch.tensor(np.array(video_output, dtype=np.float32))
+            video = torch.clamp(video_output.detach().cpu().float(), -1.0, 1.0)
+            if video.ndim == 4:
+                video = video.unsqueeze(0)   # (C,T,H,W) → (B,C,T,H,W)
 
-            # 2. → (T, H, W, C)
-            if arr.ndim == 5:
-                arr = arr[0]                          # (B,C,T,H,W) → (C,T,H,W)
-            if arr.ndim == 4:
-                if arr.shape[0] in (1, 3, 4) and arr.shape[0] < arr.shape[1]:
-                    arr = arr.transpose(1, 2, 3, 0)   # (C,T,H,W) → (T,H,W,C)
+            # 2. (T,H,W,C) uint8 — идентично real_eval_server.py save_results()
+            B = video.shape[0]
+            frames_t = video.permute(2, 0, 1, 3, 4)                          # (T,B,C,H,W)
+            frame_grids = [torchvision.utils.make_grid(f, nrow=B, padding=0) for f in frames_t]
+            grid = torch.stack(frame_grids)                                   # (T,C,H,W)
+            grid_u8 = ((grid + 1.0) / 2.0 * 255).clamp(0, 255).to(torch.uint8)
+            frames_np = grid_u8.permute(0, 2, 3, 1).numpy()                  # (T,H,W,C) RGB
 
-            # 3. → uint8 [0, 255]
-            if arr.min() >= -1.5 and arr.max() <= 1.5:
-                arr = (arr + 1.0) / 2.0 * 255.0
-            elif arr.max() <= 1.0:
-                arr = arr * 255.0
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-            arr = np.ascontiguousarray(arr)
-
-            # 4. Записать MP4 (OpenCV работает в BGR)
+            # 3. Записываем MP4 через cv2 (BGR)
             dest = self._step_dir(step) / "model_output.mp4"
-            T, H, W, C = arr.shape
+            T, H, W, _ = frames_np.shape
             fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
             writer = _cv2.VideoWriter(str(dest), fourcc, 10.0, (W, H))
-            for frame in arr:
-                if C == 3:
-                    bgr = np.ascontiguousarray(frame[:, :, ::-1])
-                elif C == 1:
-                    bgr = _cv2.cvtColor(frame, _cv2.COLOR_GRAY2BGR)
-                else:
-                    bgr = np.ascontiguousarray(frame[:, :, :3][:, :, ::-1])
-                writer.write(bgr)
+            for frame_rgb in frames_np:
+                writer.write(np.ascontiguousarray(frame_rgb[:, :, ::-1]))     # RGB→BGR
             writer.release()
+            print(f"[RECORDING] step {step:06d} → {dest}  [{T}f {H}×{W}]", flush=True)
 
-            print(f"[RECORDING] step {step:06d} → {dest}", flush=True)
-
-            # 5. Прунинг: держим только первые + последние
+            # 4. Прунинг
             self._prune_steps()
-
             return str(dest)
 
         except Exception as e:

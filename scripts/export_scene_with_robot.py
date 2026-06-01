@@ -11,7 +11,7 @@ def create_composite_usd():
     """Create a USD file that includes office_demo.usdz + G1 robot"""
 
     # Paths
-    workspace = Path("/root/skurchev/workspace")
+    workspace = Path(os.environ.get("SERVER_WORKSPACE", "/root/skurchev/workspace"))
     scene_assets = workspace / "assets"
     robot_assets = workspace / "mws-dimos/assets/robots/g1"
     output_file = workspace / "assets/office_demo_with_robot.usd"

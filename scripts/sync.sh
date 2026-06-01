@@ -2,7 +2,7 @@
 # Sync wam-stack/ to remote server.
 #
 # Usage:
-#   ./scripts/sync.sh x32-techgov-GPU-01:/root/skurchev/workspace
+#   RSYNC_RSH="ssh -p 2221" bash scripts/sync.sh root@176.109.83.84:/root/skurchev/workspace
 
 set -euo pipefail
 

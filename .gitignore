@@ -16,5 +16,10 @@ __pycache__/
 *.pth
 *.bin
 *.safetensors
-.env
+*.ckpt
 .env.local
+
+# Downloaded/generated media — never commit data
+media_downloaded/
+media_local/
+media/

@@ -4,8 +4,11 @@ Edit office_demo.usdz locally without GPU
 Add task objects and position robot
 """
 
+import os
 import sys
 from pathlib import Path
+
+_WS = os.environ.get("SERVER_WORKSPACE", "/root/skurchev/workspace")
 
 try:
     from pxr import Usd, UsdGeom, Gf
@@ -121,7 +124,7 @@ def edit_office_scene():
     print("="*60)
     print(f"\n📍 Next steps:")
     print(f"   1. Copy {output_file.name} to server:")
-    print(f"      scp -P 2221 '{output_file}' root@176.109.83.84:/root/skurchev/workspace/assets/")
+    print(f"      scp -P 2221 '{output_file}' root@176.109.83.84:{_WS}/assets/")
     print(f"   2. Update compose.yml: SCENE_FILE=office_demo_edited.usdz")
     print(f"   3. Redeploy: bash scripts/remote-deploy.sh --build")
 

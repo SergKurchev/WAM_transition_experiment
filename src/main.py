@@ -64,7 +64,7 @@ INIT_ARM_Q = [
     0.3,  0.2,  0.0,  1.2,  0.0,  0.0,  0.0,   # left arm
     0.3, -0.2,  0.0,  1.2,  0.0,  0.0,  0.0,   # right arm
 ]
-INIT_POSE_SECONDS = 300.0  # hold init pose before model takes over
+INIT_POSE_SECONDS = 10.0  # hold init pose before model takes over
 
 
 def main():

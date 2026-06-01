@@ -14,6 +14,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_ROOT="$(dirname "$SCRIPT_DIR")"
 MWS_ROOT="$(dirname "$STACK_ROOT")/mws-dimos"
 
+# Load server config (.env) and export SERVER_WORKSPACE for child processes (Python scripts).
+[ -f "${STACK_ROOT}/.env" ] && source "${STACK_ROOT}/.env"
+export SERVER_WORKSPACE="${SERVER_WORKSPACE:-/root/skurchev/workspace}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

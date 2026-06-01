@@ -13,8 +13,11 @@ The model learns to:
 - Generate periodic arm extension forward (body_height oscillates)
 """
 
+import os
 import sys
 from pathlib import Path
+
+_WS = os.environ.get("SERVER_WORKSPACE", "/root/skurchev/workspace")
 import torch
 import torch.nn as nn
 
@@ -149,7 +152,7 @@ def create_and_save_model(output_path: str = "checkpoints/unifolm_v1.pt"):
     print("SUCCESS! Model created and saved.")
     print("=" * 80)
     print(f"\nNext steps:")
-    print(f"  1. Copy to server: scp {output_path} root@176.109.83.84:/root/skurchev/workspace/wam-stack/checkpoints/")
+    print(f"  1. Copy to server: scp {output_path} root@176.109.83.84:{_WS}/wam-stack/checkpoints/")
     print(f"  2. Deploy with: WAM_CHECKPOINT=/workspace/wam/checkpoints/unifolm_v1.pt bash scripts/remote-deploy.sh --build")
     print(f"  3. Watch logs: docker logs -f wam-inference")
     print()

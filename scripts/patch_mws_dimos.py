@@ -34,10 +34,14 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import os
 import shutil
 import sys
 import time
 from pathlib import Path
+
+# Server workspace — read from environment (set by deploy.sh sourcing .env).
+_WS = os.environ.get("SERVER_WORKSPACE", "/root/skurchev/workspace")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Patch definitions
@@ -48,7 +52,7 @@ PATCHES: list[dict] = [
 
     # ── Patch 1: arm commands in SUPPORT mode ────────────────────────────────
     {
-        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "file": f"{_WS}/mws-dimos/sim/isaac/g1_sim.py",
         "description": (
             "Allow arm joint commands from rt/lowcmd in Isaac SUPPORT mode "
             "(WAM without GEAR-SONIC WBC)"
@@ -101,7 +105,7 @@ PATCHES: list[dict] = [
     # Collision geometry remains active so the robot can interact with
     # physics objects (cube, storage box).
     {
-        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "file": f"{_WS}/mws-dimos/sim/isaac/g1_sim.py",
         "description": (
             "Kinematic robot root: fix_root_link when G1_KINEMATIC_ROBOT=1 "
             "(robot follows WAM commands exactly, never falls)"
@@ -125,27 +129,16 @@ PATCHES: list[dict] = [
     # ── Patch 2: unifolm attention.py — remove xformers assertion ────────────
     {
         "file": (
-            "/root/skurchev/workspace/wam-stack/repos/unifolm"
+            f"{_WS}/wam-stack/repos/unifolm"
             "/src/unifolm_wma/modules/attention.py"
         ),
         "description": (
             "Remove xformers assertion that blocks vanilla attention "
             "(container has PyTorch 2.7/cu126, xformers requires cu128)"
         ),
-        "sentinel": "# ── WAM-patch: xformers-assert-removed",
-        "old": 'assert 1 > 2, ">>> ERROR: should setup xformers"',
-        "new": (
-            "# ── WAM-patch: xformers-assert-removed ─────────────────────────\n"
-            "                # Applied by wam-stack/scripts/patch_mws_dimos.py\n"
-            "                # Documented in wam-stack/PATCHES.md (Patch 2).\n"
-            "                # xformers built for cu128; container uses cu126.\n"
-            "                # Vanilla PyTorch attention (below) is fully functional.\n"
-            "                # ─────────────────────────────────────────────────"
-        ),
-        # attention.py was manually patched before this script existed —
-        # the assert was deleted directly without leaving a sentinel.
-        # old_missing_ok lets the script treat that case as already-done.
-        "old_missing_ok": True,
+        "sentinel": "# WAM-patch: xformers-assert-removed",
+        "old": '            assert 1 > 2, ">>> ERROR: should setup xformers and use efficient_forward ..."',
+        "new": '            pass  # WAM-patch: xformers-assert-removed (vanilla PyTorch attention used instead)',
     },
 ]
 

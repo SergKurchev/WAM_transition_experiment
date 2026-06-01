@@ -6,13 +6,13 @@ services:
     command: ["/bin/bash", "/workspace/mws-dimos/deploy/sim/ros2/entrypoints/launch_g1.sh"]
     network_mode: host
     volumes:
-      - /root/skurchev/workspace/mws-dimos/deploy/images/isaac-sim/entrypoint.sh:/entrypoint.sh:ro
-      - /root/skurchev/workspace/mws-dimos:/workspace/mws-dimos:rw
-      - /root/skurchev/workspace/mws-dimos/modules/gwbc:/workspace/gwbc:ro
-      - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
-      - /root/skurchev/workspace/mws-dimos/modules/gwbc/decoupled_wbc/control/robot_model/model_data/g1:/workspace/assets:ro
-      - /root/skurchev/workspace/mws-dimos/assets/robots/g1:/workspace/robot_assets:ro
-      - /root/skurchev/workspace/assets:/workspace/scene_assets:rw
+      - ${SERVER_WORKSPACE}/mws-dimos/deploy/images/isaac-sim/entrypoint.sh:/entrypoint.sh:ro
+      - ${SERVER_WORKSPACE}/mws-dimos:/workspace/mws-dimos:rw
+      - ${SERVER_WORKSPACE}/mws-dimos/modules/gwbc:/workspace/gwbc:ro
+      - ${SERVER_WORKSPACE}/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - ${SERVER_WORKSPACE}/mws-dimos/modules/gwbc/decoupled_wbc/control/robot_model/model_data/g1:/workspace/assets:ro
+      - ${SERVER_WORKSPACE}/mws-dimos/assets/robots/g1:/workspace/robot_assets:ro
+      - ${SERVER_WORKSPACE}/assets:/workspace/scene_assets:rw
       - sim_bridge_shm:/run/mws
     environment:
       - ACCEPT_EULA=Y
@@ -47,12 +47,12 @@ services:
     container_name: wam-inference
     network_mode: host
     volumes:
-      - /root/skurchev/workspace/wam-stack/src:/workspace/wam:rw
-      - /root/skurchev/workspace/wam-stack/checkpoints:/workspace/wam/checkpoints:ro
-      - /root/skurchev/workspace/wam-stack/media:/workspace/wam/media:rw
-      - /root/skurchev/workspace/wam-stack/repos/unifolm:/workspace/unifolm:ro
-      - /root/skurchev/workspace/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
-      - /root/skurchev/workspace/hf_cache:/root/.cache/huggingface:rw
+      - ${SERVER_WORKSPACE}/wam-stack/src:/workspace/wam:rw
+      - ${SERVER_WORKSPACE}/wam-stack/checkpoints:/workspace/wam/checkpoints:ro
+      - ${SERVER_WORKSPACE}/wam-stack/media:/workspace/wam/media:rw
+      - ${SERVER_WORKSPACE}/wam-stack/repos/unifolm:/workspace/unifolm:ro
+      - ${SERVER_WORKSPACE}/mws-dimos/modules/gwbc/external_dependencies/unitree_sdk2_python:/workspace/unitree_sdk2py_src:ro
+      - ${SERVER_WORKSPACE}/hf_cache:/root/.cache/huggingface:rw
       - sim_bridge_shm:/run/mws
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
