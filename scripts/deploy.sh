@@ -126,6 +126,25 @@ $PYTHON_CMD "$PATCH_SCRIPT" || {
 log_info "✓ Patches applied"
 
 # ============================================================================
+# 2b. Patch G1 USD asset — add wrist camera Xform mount frames
+# ============================================================================
+# Adds left/right_wrist_cam_frame Xform prims to g1_29dof.usd so that wrist
+# cameras defined in G1SceneCfg have a non-physics parent in the USD hierarchy
+# and correctly follow the wrist articulation in Isaac Sim 5.x (Fabric).
+# Without this, cameras as DIRECT children of physics bodies don't move.
+
+log_info "Patching G1 USD (wrist camera Xform frames)..."
+G1_USD_PATCH="$STACK_ROOT/scripts/patch_g1_usd.py"
+if [ -f "$G1_USD_PATCH" ]; then
+    $PYTHON_CMD "$G1_USD_PATCH" || {
+        log_warn "patch_g1_usd.py failed — wrist cameras may not follow articulation"
+    }
+    log_info "✓ G1 USD patched"
+else
+    log_warn "patch_g1_usd.py not found — skipping"
+fi
+
+# ============================================================================
 # 3. Apply scene object positions and physics (scene_config.yaml)
 # ============================================================================
 

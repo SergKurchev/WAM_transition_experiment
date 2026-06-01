@@ -1,0 +1,105 @@
+# WAM inference container with UnifoLM-WMA-0 CORRECT IMPLEMENTATION.
+# Base: CUDA 12.2 + Python 3.10.18 (from miniconda) + unifolm_wma library.
+#
+# CRITICAL: Must use Python 3.10.18 (exact) for unifolm_wma compatibility.
+# Must use cyclonedds==0.10.2 (matching GEAR-SONIC and Isaac Sim).
+
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# System dependencies for build, OpenGL, and libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl git \
+    build-essential cmake gcc g++ make \
+    libssl-dev libcudnn8 \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1-mesa-glx \
+    ffmpeg \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda for Python 3.10.18
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
+    bash Miniconda3-latest-Linux-x86_64.sh -b -p /opt/conda && \
+    rm Miniconda3-latest-Linux-x86_64.sh && \
+    /opt/conda/bin/conda clean -afy
+
+ENV PATH="/opt/conda/bin:${PATH}"
+
+# Create Python 3.10.18 environment
+RUN conda create -n unifolm python=3.10.18 -y && \
+    conda clean -afy
+
+SHELL ["/bin/bash", "-c"]
+RUN source activate unifolm && \
+    conda install pinocchio=3.2.0 -c conda-forge -y && \
+    conda install ffmpeg=7.1.1 -c conda-forge -y && \
+    conda clean -afy
+
+# Activate unifolm environment by default
+ENV CONDA_DEFAULT_ENV=unifolm
+ENV PATH="/opt/conda/envs/unifolm/bin:${PATH}"
+
+# Build CycloneDDS 0.10.x C library from source (for DDS compatibility)
+RUN git clone --depth 1 -b releases/0.10.x \
+        https://github.com/eclipse-cyclonedds/cyclonedds.git /tmp/cyclonedds && \
+    cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build \
+          -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds \
+          -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && \
+    cmake --build /tmp/cyclonedds/build -j$(nproc) && \
+    cmake --install /tmp/cyclonedds/build && \
+    rm -rf /tmp/cyclonedds
+
+ENV CYCLONEDDS_HOME=/opt/cyclonedds
+ENV LD_LIBRARY_PATH="/opt/cyclonedds/lib:${LD_LIBRARY_PATH:-}"
+
+# Install PyTorch for CUDA 12.2
+RUN pip install --no-cache-dir \
+    torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 \
+    --index-url https://download.pytorch.org/whl/cu122
+
+# Install core ML stack (matching unifolm dependencies)
+RUN pip install --no-cache-dir \
+    numpy==1.24.2 \
+    transformers==4.40.1 \
+    diffusers==0.30.2 \
+    open-clip-torch==2.22.0 \
+    pytorch-lightning==1.9.3 \
+    omegaconf==2.3.0 \
+    einops==0.8.0 \
+    opencv-python==4.10.0.84 \
+    Pillow==9.5.0 \
+    pyyaml==6.0 \
+    tqdm==4.66.5 \
+    imageio==2.35.1 \
+    decord==0.6.0 \
+    av==12.3.0 \
+    moviepy==1.0.3 \
+    pandas==2.0.0 \
+    xformers==0.0.27 \
+    accelerate==1.7.0 \
+    timm==0.9.10 \
+    scikit-learn==1.5.1 \
+    kornia==0.7.3 \
+    draccus==0.11.5 \
+    huggingface-hub \
+    "cyclonedds==0.10.2"
+
+# Clone and install UnifoLM from local source (must exist in build context)
+# NOTE: Requires COPY from docker compose or mount
+RUN mkdir -p /tmp/unifolm_src && \
+    pip install --no-cache-dir \
+    faiss-cpu fairscale setuptools>=65.6.3
+
+# Placeholder: unifolm will be installed from /workspace/unifolm or mounted repos
+# In docker-compose, mount: ./repos/unifolm:/workspace/unifolm (read-only)
+# Then uncomment:
+# RUN cd /workspace/unifolm && pip install -e . && \
+#     cd /workspace/unifolm/external/dlimp && pip install -e .
+
+# /workspace/wam      — model code (bind-mounted, hot-reload)
+# /workspace/unitree_sdk2py_src — DDS SDK (bind-mounted read-only)
+WORKDIR /workspace/wam
+
+CMD ["python", "main.py"]

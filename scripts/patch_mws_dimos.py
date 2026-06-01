@@ -155,7 +155,7 @@ PATCHES: list[dict] = [
     {
         "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
         "description": "Add camera_left_wrist and camera_right_wrist CameraCfg to G1SceneCfg",
-        "sentinel": "# ── WAM-patch: wrist-cameras-cfg-v3",
+        "sentinel": "# ── WAM-patch: wrist-cameras-cfg-v4",
         "old": (
             "        offset=CameraCfg.OffsetCfg(),\n"
             "    )\n"
@@ -164,19 +164,25 @@ PATCHES: list[dict] = [
         "new": (
             "        offset=CameraCfg.OffsetCfg(),\n"
             "    )\n"
-            "    # ── WAM-patch: wrist-cameras-cfg-v3 ──────────────────────────────\n"
+            "    # ── WAM-patch: wrist-cameras-cfg-v4 ──────────────────────────────\n"
             "    # Applied by wam-stack/scripts/patch_mws_dimos.py (Patch 4).\n"
             "    # Wrist cameras for LingBot-VA 3-camera observation.\n"
             "    #\n"
-            "    # Derived from diagnostic captures (30 May 2026):\n"
-            "    #   identity rot=(1,0,0,0)  → camera -Z = parent -Z = world DOWN\n"
-            "    #     → grey ground plane visible  → camera IS at wrist position ✓\n"
-            "    #   fingers extend along parent +X  (palm_link offset +0.041 X)\n"
-            "    #   rot=(0.7071,0,-0.7071,0) = -90° around Y (OpenGL):\n"
-            "    #     camera -Z  →  parent +X  →  toward fingers / workspace\n"
-            "    #   pos=(0.06,0,0) pushes 6 cm along arm axis away from wrist centre.\n"
+            "    # Root cause of v1-v3 failure (30 May 2026):\n"
+            "    #   Direct children of physics rigid bodies in Isaac Sim 5.x (Fabric)\n"
+            "    #   do not follow articulation transforms when created dynamically.\n"
+            "    #   Fix: Patch 13 pre-creates non-physics Xform frames (left/right_wrist_cam_frame)\n"
+            "    #   on the USD stage BEFORE InteractiveScene init. These Xforms are\n"
+            "    #   non-physics and properly inherit the wrist_yaw_link world transform.\n"
+            "    #\n"
+            "    # Camera paths now use the Xform frame as parent:\n"
+            "    #   .../left_wrist_yaw_link/left_wrist_cam_frame/camera_left_wrist\n"
+            "    #\n"
+            "    # rot=(0.7071,0,-0.7071,0): -90° around Y (OpenGL convention)\n"
+            "    #   identity → camera -Z = parent -Z = world down → grey ground ✓ (confirmed)\n"
+            "    #   -90°Y    → camera -Z = parent +X = toward fingers / workspace\n"
             "    camera_left_wrist: CameraCfg = CameraCfg(\n"
-            "        prim_path=\"/World/envs/env_.*/Robot/left_wrist_yaw_link/camera_left_wrist\",\n"
+            "        prim_path=\"/World/envs/env_.*/Robot/left_wrist_yaw_link/left_wrist_cam_frame/camera_left_wrist\",\n"
             "        update_period=1.0 / _D435I_FPS,\n"
             "        height=_D435I_HEIGHT,\n"
             "        width=_D435I_WIDTH,\n"
@@ -196,7 +202,7 @@ PATCHES: list[dict] = [
             "        ),\n"
             "    )\n"
             "    camera_right_wrist: CameraCfg = CameraCfg(\n"
-            "        prim_path=\"/World/envs/env_.*/Robot/right_wrist_yaw_link/camera_right_wrist\",\n"
+            "        prim_path=\"/World/envs/env_.*/Robot/right_wrist_yaw_link/right_wrist_cam_frame/camera_right_wrist\",\n"
             "        update_period=1.0 / _D435I_FPS,\n"
             "        height=_D435I_HEIGHT,\n"
             "        width=_D435I_WIDTH,\n"
@@ -479,7 +485,383 @@ PATCHES: list[dict] = [
             "    def read_cmd("
         ),
     },
+
+    # ── Patch 14: explicit wrist camera pose sync from physics state ─────────
+    # Root cause: Isaac Sim 5.x only updates the ROOT rigid body's USD xformOp
+    # from Fabric at each render step. Articulation child links (arms, legs)
+    # are rendered via the articulation's internal kinematics cache, bypassing
+    # USD xformOp updates for individual links.  Cameras parented to arm links
+    # therefore use stale T-pose xformOps and stay fixed in world space.
+    #
+    # Fix: before each sim.render(), explicitly call camera.set_world_poses()
+    # with the current physics-derived wrist link pose from robot.data.body_*_w.
+    # set_world_poses() writes the pose directly to the camera prim's xformOp,
+    # forcing the render product to use the current arm position.
+    #
+    # OffsetCfg (0.06m along +X, rot -90°Y) is applied as a local transform
+    # AFTER the wrist body's world pose to get the final camera world pose.
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": (
+            "Acquire wrist body indices and add a helper to sync wrist camera "
+            "poses from physics state before each render"
+        ),
+        "sentinel": "# ── WAM-patch: wrist-cameras-body-idx",
+        "old": (
+            "    root_body_idx = robot.data.body_names.index(\"pelvis\")\n"
+            "    torso_body_idx = robot.data.body_names.index(\"torso_link\")"
+        ),
+        "new": (
+            "    root_body_idx = robot.data.body_names.index(\"pelvis\")\n"
+            "    torso_body_idx = robot.data.body_names.index(\"torso_link\")\n"
+            "    # ── WAM-patch: wrist-cameras-body-idx ────────────────────────────\n"
+            "    # Applied by wam-stack/scripts/patch_mws_dimos.py (Patch 14).\n"
+            "    # Wrist body indices for explicit camera pose sync (see Patch 14).\n"
+            "    _left_wrist_body_idx  = (\n"
+            "        robot.data.body_names.index(\"left_wrist_yaw_link\")\n"
+            "        if \"left_wrist_yaw_link\"  in robot.data.body_names else -1\n"
+            "    )\n"
+            "    _right_wrist_body_idx = (\n"
+            "        robot.data.body_names.index(\"right_wrist_yaw_link\")\n"
+            "        if \"right_wrist_yaw_link\" in robot.data.body_names else -1\n"
+            "    )\n"
+            "    print(\n"
+            "        f\"[g1_sim] wrist body indices: left={_left_wrist_body_idx}\"\n"
+            "        f\"  right={_right_wrist_body_idx}\",\n"
+            "        flush=True,\n"
+            "    )\n"
+            "    # ─────────────────────────────────────────────────────────────────"
+        ),
+    },
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": (
+            "Sync wrist camera world poses from physics state before sim.render()"
+        ),
+        "sentinel": "# ── WAM-patch: wrist-cameras-pose-sync",
+        "old": (
+            "            _render_for_camera = not no_render and env_step % CAMERA_PUBLISH_EVERY_N_STEPS == 0\n"
+            "            _render_for_gui = should_render and env_step % render_every == 0\n"
+            "            if _render_for_camera or _render_for_gui:\n"
+            "                sim.render()"
+        ),
+        "new": (
+            "            _render_for_camera = not no_render and env_step % CAMERA_PUBLISH_EVERY_N_STEPS == 0\n"
+            "            _render_for_gui = should_render and env_step % render_every == 0\n"
+            "            if _render_for_camera or _render_for_gui:\n"
+            "                # ── WAM-patch: wrist-cameras-pose-sync ───────────────\n"
+            "                # Explicitly write current physics wrist poses to the\n"
+            "                # camera prims before rendering — Isaac Sim 5.x does\n"
+            "                # not write back per-link xformOps from Fabric.\n"
+            "                if (\n"
+            "                    _render_for_camera\n"
+            "                    and left_wrist_cam is not None\n"
+            "                    and _left_wrist_body_idx >= 0\n"
+            "                ):\n"
+            "                    _lp = robot.data.body_pos_w[0:1, _left_wrist_body_idx]\n"
+            "                    _lq = robot.data.body_quat_w[0:1, _left_wrist_body_idx]\n"
+            "                    _rp = robot.data.body_pos_w[0:1, _right_wrist_body_idx]\n"
+            "                    _rq = robot.data.body_quat_w[0:1, _right_wrist_body_idx]\n"
+            "                    left_wrist_cam.set_world_poses(_lp, _lq)\n"
+            "                    right_wrist_cam.set_world_poses(_rp, _rq)\n"
+            "                # ─────────────────────────────────────────────────────\n"
+            "                sim.render()"
+        ),
+    },
+
+    # ── Patch 15: apply OffsetCfg in wrist camera pose sync ─────────────────
+    # Patch 14 sets camera world pose = wrist body pose (no offset).
+    # This patch replaces the bare set_world_poses calls with offset-aware ones:
+    #   cam_pos_w  = wrist_pos_w + rotate(wrist_quat_w, offset_pos)
+    #   cam_quat_w = quat_mul(wrist_quat_w, offset_quat)
+    # where offset_pos=(0.06, 0, 0) m and offset_quat=(0.7071, 0, -0.7071, 0)
+    # which is -90°Y, making the camera look along the wrist's +X (toward fingers
+    # and the task workspace when the arm is extended toward the table).
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": (
+            "Apply OffsetCfg (0.06m +X, -90°Y) when syncing wrist camera "
+            "world poses so cameras look toward the task workspace"
+        ),
+        "sentinel": "# ── WAM-patch: wrist-cameras-pose-sync-v2",
+        "old": (
+            "                    _lp = robot.data.body_pos_w[0:1, _left_wrist_body_idx]\n"
+            "                    _lq = robot.data.body_quat_w[0:1, _left_wrist_body_idx]\n"
+            "                    _rp = robot.data.body_pos_w[0:1, _right_wrist_body_idx]\n"
+            "                    _rq = robot.data.body_quat_w[0:1, _right_wrist_body_idx]\n"
+            "                    left_wrist_cam.set_world_poses(_lp, _lq)\n"
+            "                    right_wrist_cam.set_world_poses(_rp, _rq)"
+        ),
+        "new": (
+            "                    # ── WAM-patch: wrist-cameras-pose-sync-v2 ──\n"
+            "                    # cam_pos = wrist_pos + rotate(wrist_quat, +0.06m X)\n"
+            "                    # cam_quat = wrist_quat * offset(-90°Y)\n"
+            "                    # → camera looks along wrist +X (toward fingers)\n"
+            "                    from isaaclab.utils.math import quat_apply, quat_mul\n"
+            "                    _off_p = torch.tensor(\n"
+            "                        [[0.06, 0.0, 0.0]], device=robot.device)\n"
+            "                    _off_q = torch.tensor(\n"
+            "                        [[0.7071, 0.0, -0.7071, 0.0]], device=robot.device)\n"
+            "                    _lp = robot.data.body_pos_w[0:1, _left_wrist_body_idx]\n"
+            "                    _lq = robot.data.body_quat_w[0:1, _left_wrist_body_idx]\n"
+            "                    _rp = robot.data.body_pos_w[0:1, _right_wrist_body_idx]\n"
+            "                    _rq = robot.data.body_quat_w[0:1, _right_wrist_body_idx]\n"
+            "                    left_wrist_cam.set_world_poses(\n"
+            "                        _lp + quat_apply(_lq, _off_p),\n"
+            "                        quat_mul(_lq, _off_q),\n"
+            "                    )\n"
+            "                    right_wrist_cam.set_world_poses(\n"
+            "                        _rp + quat_apply(_rq, _off_p),\n"
+            "                        quat_mul(_rq, _off_q),\n"
+            "                    )"
+        ),
+    },
+
+    # ── Patch 16: write right-wrist cam pose to JSON after each render ────────
+    # Writes /run/mws/camera_right_wrist_pose.json (on the sim_bridge_shm
+    # volume) so that capture_snapshot.py can read both image and pose from
+    # the wam container without touching Isaac Sim directly.
+    # JSON contains:
+    #   - world position/quaternion of the camera prim
+    #   - world position/quaternion of right_wrist_yaw_link
+    #   - fixed offset (local) from wrist joint to camera
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Write right-wrist cam pose JSON to SHM after each render",
+        "sentinel": "# ── WAM-patch: wrist-cam-pose-json",
+        "old": (
+            "                    right_wrist_cam.set_world_poses(\n"
+            "                        _rp + quat_apply(_rq, _off_p),\n"
+            "                        quat_mul(_rq, _off_q),\n"
+            "                    )"
+        ),
+        "new": (
+            "                    right_wrist_cam.set_world_poses(\n"
+            "                        _rp + quat_apply(_rq, _off_p),\n"
+            "                        quat_mul(_rq, _off_q),\n"
+            "                    )\n"
+            "                    # ── WAM-patch: wrist-cam-pose-json ──────────\n"
+            "                    import json as _json\n"
+            "                    _rp_cam = (_rp + quat_apply(_rq, _off_p)).squeeze(0).tolist()\n"
+            "                    _rq_cam = quat_mul(_rq, _off_q).squeeze(0).tolist()\n"
+            "                    with open('/run/mws/camera_right_wrist_pose.json', 'w') as _pf:\n"
+            "                        _json.dump({\n"
+            "                            'timestamp': float(sim.current_time),\n"
+            "                            'right_wrist_cam': {\n"
+            "                                'world': {\n"
+            "                                    'position': _rp_cam,\n"
+            "                                    'quaternion_wxyz': _rq_cam,\n"
+            "                                },\n"
+            "                                'relative_to_right_wrist_yaw_link': {\n"
+            "                                    'position': [0.06, 0.0, 0.0],\n"
+            "                                    'quaternion_wxyz': [0.7071, 0.0, -0.7071, 0.0],\n"
+            "                                },\n"
+            "                            },\n"
+            "                            'right_wrist_yaw_link': {\n"
+            "                                'world': {\n"
+            "                                    'position': _rp.squeeze(0).tolist(),\n"
+            "                                    'quaternion_wxyz': _rq.squeeze(0).tolist(),\n"
+            "                                },\n"
+            "                            },\n"
+            "                        }, _pf)"
+        ),
+    },
+
+    # ── Patch 19a: Skip set_world_poses in calibrate mode ───────────────────────
+    # When /run/mws/cam_calibrate_mode flag file exists, do NOT override the
+    # camera prim positions — the user's manual viewport placement is preserved.
+    # Also stores _calibrate_mode variable for Patch 19b.
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Skip set_world_poses when /run/mws/cam_calibrate_mode flag exists",
+        "sentinel": "# ── WAM-patch: calibrate-mode-skip-set-poses",
+        "old": (
+            "                    left_wrist_cam.set_world_poses(\n"
+            "                        _lp + quat_apply(_lq, _off_p),\n"
+            "                        quat_mul(_lq, _off_q),\n"
+            "                    )\n"
+            "                    right_wrist_cam.set_world_poses(\n"
+            "                        _rp + quat_apply(_rq, _off_p),\n"
+            "                        quat_mul(_rq, _off_q),\n"
+            "                    )"
+        ),
+        "new": (
+            "                    # ── WAM-patch: calibrate-mode-skip-set-poses ──\n"
+            "                    _calibrate_mode = _os.path.exists('/run/mws/cam_calibrate_mode')\n"
+            "                    if not _calibrate_mode:\n"
+            "                        left_wrist_cam.set_world_poses(\n"
+            "                            _lp + quat_apply(_lq, _off_p),\n"
+            "                            quat_mul(_lq, _off_q),\n"
+            "                        )\n"
+            "                        right_wrist_cam.set_world_poses(\n"
+            "                            _rp + quat_apply(_rq, _off_p),\n"
+            "                            quat_mul(_rq, _off_q),\n"
+            "                        )"
+        ),
+    },
+
+    # ── Patch 19b: Measure actual camera offset after render (calibrate mode) ───
+    # Runs AFTER sim.render() so camera.data.pos_w reflects the prim's current
+    # world pose (user's manual placement, since set_world_poses was skipped).
+    # Computes local offset = inv(wrist_quat) * (cam_pos - wrist_pos) and writes
+    # it to /run/mws/cam_calibrate_result.json for the user to copy to
+    # scripts/wrist_cam_offset.json.
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Measure actual wrist cam offset after render and write to SHM JSON",
+        "sentinel": "# ── WAM-patch: calibrate-mode-measure",
+        "old": (
+            "                    bridge.publish_wrist_cameras(sim_time=sim.current_time)\n"
+            "                    # ─────────────────────────────────────────────────"
+        ),
+        "new": (
+            "                    bridge.publish_wrist_cameras(sim_time=sim.current_time)\n"
+            "                    # ── WAM-patch: calibrate-mode-measure ────────────\n"
+            "                    try:\n"
+            "                        import os as _os_c, json as _json_c\n"
+            "                        if _os_c.path.exists('/run/mws/cam_calibrate_mode') \\\n"
+            "                                and left_wrist_cam is not None \\\n"
+            "                                and _left_wrist_body_idx >= 0:\n"
+            "                            from isaaclab.utils.math import quat_apply, quat_mul, quat_inv as _qi\n"
+            "                            _lp2 = robot.data.body_pos_w[0:1, _left_wrist_body_idx]\n"
+            "                            _lq2 = robot.data.body_quat_w[0:1, _left_wrist_body_idx]\n"
+            "                            _rp2 = robot.data.body_pos_w[0:1, _right_wrist_body_idx]\n"
+            "                            _rq2 = robot.data.body_quat_w[0:1, _right_wrist_body_idx]\n"
+            "                            _la  = left_wrist_cam.data.pos_w[0:1]\n"
+            "                            _laq = left_wrist_cam.data.quat_w_ros[0:1]\n"
+            "                            _laq = torch.cat([_laq[:, 3:], _laq[:, :3]], 1)\n"
+            "                            _ra  = right_wrist_cam.data.pos_w[0:1]\n"
+            "                            _raq = right_wrist_cam.data.quat_w_ros[0:1]\n"
+            "                            _raq = torch.cat([_raq[:, 3:], _raq[:, :3]], 1)\n"
+            "                            with open('/run/mws/cam_calibrate_result.json', 'w') as _cf:\n"
+            "                                _json_c.dump({\n"
+            "                                    '_note': 'copy to scripts/wrist_cam_offset.json',\n"
+            "                                    'left': {\n"
+            "                                        'position': quat_apply(_qi(_lq2), _la - _lp2).squeeze(0).tolist(),\n"
+            "                                        'quaternion_wxyz': quat_mul(_qi(_lq2), _laq).squeeze(0).tolist(),\n"
+            "                                    },\n"
+            "                                    'right': {\n"
+            "                                        'position': quat_apply(_qi(_rq2), _ra - _rp2).squeeze(0).tolist(),\n"
+            "                                        'quaternion_wxyz': quat_mul(_qi(_rq2), _raq).squeeze(0).tolist(),\n"
+            "                                    },\n"
+            "                                }, _cf, indent=2)\n"
+            "                    except Exception:\n"
+            "                        pass\n"
+            "                    # ─────────────────────────────────────────────────"
+        ),
+    },
+
+    # ── Patch 17a: Read camera offset from /run/mws/camera_offset.json ──────────
+    # Enables live calibration without sim restart: edit scripts/wrist_cam_offset.json
+    # and run grab_snapshot.sh — the next render cycle picks up the new offset.
+    # Falls back to the original hardcoded values if the file does not exist.
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Read wrist camera offset from /run/mws/camera_offset.json (live calibration)",
+        "sentinel": "# ── WAM-patch: dynamic-cam-offset",
+        "old": (
+            "                    _off_p = torch.tensor(\n"
+            "                        [[0.06, 0.0, 0.0]], device=robot.device)\n"
+            "                    _off_q = torch.tensor(\n"
+            "                        [[0.7071, 0.0, -0.7071, 0.0]], device=robot.device)"
+        ),
+        "new": (
+            "                    # ── WAM-patch: dynamic-cam-offset ────────────\n"
+            "                    # Edit scripts/wrist_cam_offset.json on the host and\n"
+            "                    # run grab_snapshot.sh — no restart needed.\n"
+            "                    import json as _json, os as _os\n"
+            "                    _offset_cfg = '/run/mws/camera_offset.json'\n"
+            "                    if _os.path.exists(_offset_cfg):\n"
+            "                        with open(_offset_cfg) as _f:\n"
+            "                            _ocfg = _json.load(_f)\n"
+            "                        _off_p = torch.tensor(\n"
+            "                            [_ocfg['position']], device=robot.device, dtype=torch.float32)\n"
+            "                        _off_q = torch.tensor(\n"
+            "                            [_ocfg['quaternion_wxyz']], device=robot.device, dtype=torch.float32)\n"
+            "                    else:\n"
+            "                        _off_p = torch.tensor(\n"
+            "                            [[0.06, 0.0, 0.0]], device=robot.device)\n"
+            "                        _off_q = torch.tensor(\n"
+            "                            [[0.7071, 0.0, -0.7071, 0.0]], device=robot.device)"
+        ),
+    },
+
+    # ── Patch 17b: Save actual (possibly dynamic) offset values in pose JSON ─────
+    # Updates the 'relative_to_right_wrist_yaw_link' section of the JSON written
+    # by Patch 16 to reflect whatever offset was actually used (from Patch 17a).
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Save actual dynamic offset values in right-wrist pose JSON",
+        "sentinel": "# ── WAM-patch: dynamic-cam-offset-json",
+        "old": (
+            "                                'relative_to_right_wrist_yaw_link': {\n"
+            "                                    'position': [0.06, 0.0, 0.0],\n"
+            "                                    'quaternion_wxyz': [0.7071, 0.0, -0.7071, 0.0],\n"
+            "                                },"
+        ),
+        "new": (
+            "                                'relative_to_right_wrist_yaw_link': {\n"
+            "                                    # ── WAM-patch: dynamic-cam-offset-json\n"
+            "                                    'position': _off_p.squeeze(0).tolist(),\n"
+            "                                    'quaternion_wxyz': _off_q.squeeze(0).tolist(),\n"
+            "                                },"
+        ),
+    },
+
+    # ── Patch 18: write LEFT-wrist cam pose JSON to SHM after each render ───────
+    # Mirrors Patch 16 for the left wrist.  Uses _lp/_lq (left body pose) and
+    # the same _off_p/_off_q offset (which may be dynamic via Patch 17a).
+    # Depends on Patches 16, 17a, 17b being applied first — so it must come last.
+    {
+        "file": "/root/skurchev/workspace/mws-dimos/sim/isaac/g1_sim.py",
+        "description": "Write left-wrist cam pose JSON to SHM after each render",
+        "sentinel": "# ── WAM-patch: left-wrist-cam-pose-json",
+        "old": (
+            "                            'right_wrist_yaw_link': {\n"
+            "                                'world': {\n"
+            "                                    'position': _rp.squeeze(0).tolist(),\n"
+            "                                    'quaternion_wxyz': _rq.squeeze(0).tolist(),\n"
+            "                                },\n"
+            "                            },\n"
+            "                        }, _pf)"
+        ),
+        "new": (
+            "                            'right_wrist_yaw_link': {\n"
+            "                                'world': {\n"
+            "                                    'position': _rp.squeeze(0).tolist(),\n"
+            "                                    'quaternion_wxyz': _rq.squeeze(0).tolist(),\n"
+            "                                },\n"
+            "                            },\n"
+            "                        }, _pf)\n"
+            "                    # ── WAM-patch: left-wrist-cam-pose-json ─────\n"
+            "                    _lp_cam = (_lp + quat_apply(_lq, _off_p)).squeeze(0).tolist()\n"
+            "                    _lq_cam = quat_mul(_lq, _off_q).squeeze(0).tolist()\n"
+            "                    with open('/run/mws/camera_left_wrist_pose.json', 'w') as _pf2:\n"
+            "                        _json.dump({\n"
+            "                            'timestamp': float(sim.current_time),\n"
+            "                            'left_wrist_cam': {\n"
+            "                                'world': {\n"
+            "                                    'position': _lp_cam,\n"
+            "                                    'quaternion_wxyz': _lq_cam,\n"
+            "                                },\n"
+            "                                'relative_to_left_wrist_yaw_link': {\n"
+            "                                    'position': _off_p.squeeze(0).tolist(),\n"
+            "                                    'quaternion_wxyz': _off_q.squeeze(0).tolist(),\n"
+            "                                },\n"
+            "                            },\n"
+            "                            'left_wrist_yaw_link': {\n"
+            "                                'world': {\n"
+            "                                    'position': _lp.squeeze(0).tolist(),\n"
+            "                                    'quaternion_wxyz': _lq.squeeze(0).tolist(),\n"
+            "                                },\n"
+            "                            },\n"
+            "                        }, _pf2)"
+        ),
+    },
 ]
+# Patch 13 (pre-create Xform frames in g1_sim.py) was removed.
+# The correct fix is patch_g1_usd.py (adds Xform frames to G1 USD asset)
+# combined with Patch 14 (explicit pose sync via set_world_poses).
 
 
 # ─────────────────────────────────────────────────────────────────────────────

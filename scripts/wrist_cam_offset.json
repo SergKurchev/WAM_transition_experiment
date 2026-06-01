@@ -1,0 +1,13 @@
+{
+  "left": {
+    "position": [0.06, 0.04, 0.0],
+    "quaternion_wxyz": [0.9914, 0.1305, 0.0, 0.0],
+    "_calc": "pos: +0.06 X +0.04 Y; rot: Ry(-90)+Ry(+90)+Rx(+15) = Rx(+15)"
+  },
+  "right": {
+    "position": [0.06, 0.0, 0.0],
+    "quaternion_wxyz": [0.7071, 0.0, -0.7071, 0.0],
+    "_calc": "original: +6 cm X, Ry(-90) → camera looks along wrist +X"
+  },
+  "_note": "Edit left/right independently. Run bash scripts/grab_snapshot.sh — no restart needed."
+}
